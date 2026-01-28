@@ -825,6 +825,8 @@ Re-syncing is safe - updates existing entries instead of creating duplicates."
     ;; Save shop file
     (with-current-buffer (find-file-noselect shop-file)
       (save-buffer))
+    ;; Recalculate summary row in shopping list
+    (org-shop-recalculate)
     (message "Synced to %s: %d logged, %d removed, %d price(s) updated, %d new product(s)"
              shop-name logged removed price-updated products-added)))
 
@@ -832,10 +834,10 @@ Re-syncing is safe - updates existing entries instead of creating duplicates."
 ;;; Keymap Setup
 ;;; ============================================================================
 
-;;;###autoload
 (defun org-shop-recalculate ()
   "Recalculate the summary row in current shopping list table.
-Updates: done count, total count, discount, known_price sum, price diff."
+Updates: done count, total count, discount, total price (count * effective_price).
+Effective price = new_price if set, otherwise known_price."
   (interactive)
   (unless (org-at-table-p)
     (user-error "Not in an org table"))
@@ -845,7 +847,7 @@ Updates: done count, total count, discount, known_price sum, price diff."
     (let ((marked 0) (unmarked 0)
           (total-count 0)
           (total-discount 0.0)
-          (total-known 0.0)
+          (total-price 0.0)
           (total-diff 0.0)
           (summary-line nil))
       ;; Iterate through table rows
@@ -866,24 +868,32 @@ Updates: done count, total count, discount, known_price sum, price diff."
                   (if (string-match-p "X" done)
                       (cl-incf marked)
                     (cl-incf unmarked))
-                  ;; Sum counts
-                  (unless (string-empty-p count-str)
-                    (setq total-count (+ total-count (string-to-number count-str))))
-                  ;; Sum known prices
-                  (unless (string-empty-p known-str)
-                    (setq total-known (+ total-known (string-to-number known-str))))
-                  ;; Calculate discount (rate * price)
-                  (when (and (not (string-empty-p disc-str))
-                             (not (string-empty-p known-str)))
-                    (setq total-discount (+ total-discount
-                                            (* (string-to-number disc-str)
-                                               (string-to-number known-str)))))
-                  ;; Calculate diff (new - known)
-                  (when (not (string-empty-p new-str))
-                    (let ((known (if (string-empty-p known-str) 0
-                                   (string-to-number known-str)))
-                          (new (string-to-number new-str)))
-                      (setq total-diff (+ total-diff (- new known))))))))))
+                  ;; Get count (default 1 if empty)
+                  (let ((count (if (string-empty-p count-str) 1
+                                 (string-to-number count-str))))
+                    ;; Sum counts
+                    (setq total-count (+ total-count count))
+                    ;; Calculate effective price (new_price overrides known_price)
+                    (let ((effective-price (cond
+                                            ((not (string-empty-p new-str))
+                                             (string-to-number new-str))
+                                            ((not (string-empty-p known-str))
+                                             (string-to-number known-str))
+                                            (t 0))))
+                      ;; Sum price * count
+                      (setq total-price (+ total-price (* count effective-price)))
+                      ;; Calculate discount (rate * effective_price * count)
+                      (when (not (string-empty-p disc-str))
+                        (setq total-discount (+ total-discount
+                                                (* (string-to-number disc-str)
+                                                   effective-price
+                                                   count))))
+                      ;; Calculate diff (new - known) * count
+                      (when (not (string-empty-p new-str))
+                        (let ((known (if (string-empty-p known-str) 0
+                                       (string-to-number known-str)))
+                              (new (string-to-number new-str)))
+                          (setq total-diff (+ total-diff (* count (- new known)))))))))))))
         (forward-line 1))
       ;; Update summary row
       (when summary-line
@@ -891,12 +901,9 @@ Updates: done count, total count, discount, known_price sum, price diff."
         (org-table-put nil 2 (format "%dU %dM" unmarked marked))
         (org-table-put nil 3 (if (zerop total-count) "" (number-to-string total-count)))
         (org-table-put nil 4 (if (zerop total-discount) "" (format "%.2f" total-discount)))
-        (org-table-put nil 6 (format "%.2f" total-known))
+        (org-table-put nil 6 (format "%.2f" total-price))
         (org-table-put nil 7 (format "%s%.2f" (if (>= total-diff 0) "+" "") total-diff))
-        (org-table-align)
-        (message "Summary recalculated: %dU %dM, total: %.2f, diff: %s%.2f"
-                 unmarked marked total-known
-                 (if (>= total-diff 0) "+" "") total-diff)))))
+        (org-table-align)))))
 
 (defvar org-shop-command-map
   (let ((map (make-sparse-keymap)))
@@ -904,7 +911,6 @@ Updates: done count, total count, discount, known_price sum, price diff."
     (define-key map (kbd "g") #'org-shop-generate)
     (define-key map (kbd "s") #'org-shop-sync)
     (define-key map (kbd "c") #'org-shop-clear-marks)
-    (define-key map (kbd "r") #'org-shop-recalculate)
     map)
   "Command map for org-shop.
 \\{org-shop-command-map}")
@@ -915,9 +921,8 @@ Updates: done count, total count, discount, known_price sum, price diff."
 Binds commands under `org-shop-keymap-prefix' (default C-c S):
   <prefix> m - Toggle mark (next in shop, done in daily)
   <prefix> g - Generate shopping list
-  <prefix> s - Sync prices back to shop
-  <prefix> c - Clear all marks
-  <prefix> r - Recalculate summary row"
+  <prefix> s - Sync to shop (also recalculates summary)
+  <prefix> c - Clear all marks"
   (interactive)
   (when org-shop-setup-keymaps
     (global-set-key (kbd org-shop-keymap-prefix) org-shop-command-map))
