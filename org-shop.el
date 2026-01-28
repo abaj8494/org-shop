@@ -681,29 +681,39 @@ Otherwise: insert new row."
                 (beginning-of-line)
                 ;; Skip header
                 (forward-line 1)
-                (when (org-at-table-hline-p)
-                  (forward-line 1))
-                ;; Find last data row (before hline or TOTAL)
-                (let ((insert-point nil))
-                  (while (and (org-at-table-p) (not (eobp)))
-                    (if (or (org-at-table-hline-p)
-                            (string= (string-trim (or (org-table-get nil 1) "")) "TOTAL"))
-                        ;; Found hline or TOTAL - insert before this
-                        (progn
-                          (forward-line -1)
+                (let ((after-header-hline nil))
+                  (when (org-at-table-hline-p)
+                    (setq after-header-hline (point))
+                    (forward-line 1))
+                  ;; Find last data row (before hline or TOTAL)
+                  (let ((insert-point nil))
+                    ;; Handle empty table (no data rows)
+                    (if (not (org-at-table-p))
+                        ;; Table is empty, insert after the header hline
+                        (when after-header-hline
+                          (goto-char after-header-hline)
                           (end-of-line)
-                          (setq insert-point (point))
-                          (goto-char (point-max))) ; exit loop
-                      (setq insert-point (progn (end-of-line) (point)))
-                      (forward-line 1)))
-                  (when insert-point
-                    (goto-char insert-point)
-                    (insert (format "\n| %s | %s | %s | %s |"
-                                    product
-                                    date
-                                    count-num
-                                    price))
-                    (org-table-align))))
+                          (setq insert-point (point)))
+                      ;; Table has data rows, find last one
+                      (while (and (org-at-table-p) (not (eobp)))
+                        (if (or (org-at-table-hline-p)
+                                (string= (string-trim (or (org-table-get nil 1) "")) "TOTAL"))
+                            ;; Found hline or TOTAL - insert before this
+                            (progn
+                              (forward-line -1)
+                              (end-of-line)
+                              (setq insert-point (point))
+                              (goto-char (point-max))) ; exit loop
+                          (setq insert-point (progn (end-of-line) (point)))
+                          (forward-line 1))))
+                    (when insert-point
+                      (goto-char insert-point)
+                      (insert (format "\n| %s | %s | %s | %s |"
+                                      product
+                                      date
+                                      count-num
+                                      price))
+                      (org-table-align)))))
                ;; No entry and count = 0: do nothing
                (t nil)))
             ;; Recalculate TOTAL row
