@@ -641,10 +641,78 @@ Otherwise: insert new row."
                                 price))
                 (org-table-align))
                ;; No entry and count = 0: do nothing
-               (t nil)))))))))
+               (t nil)))
+            ;; Recalculate TOTAL row
+            (org-shop--recalculate-history-total)))))))
 
 ;; Keep old name as alias for compatibility
 (defalias 'org-shop--append-history 'org-shop--upsert-history)
+
+(defun org-shop--recalculate-history-total ()
+  "Recalculate TOTAL row in current history table.
+Calculates: unique days shopped, total item count, total price."
+  (when (org-at-table-p)
+    (let ((dates (make-hash-table :test 'equal))
+          (total-count 0)
+          (total-price 0.0)
+          (total-line nil)
+          (table-start (point)))
+      ;; First pass: collect stats and find TOTAL row
+      (org-table-goto-line 1)
+      (while (and (org-at-table-p) (not (eobp)))
+        (unless (org-at-table-hline-p)
+          (let ((product (string-trim (or (org-table-get nil 1) "")))
+                (date (string-trim (or (org-table-get nil 2) "")))
+                (count-str (string-trim (or (org-table-get nil 3) "")))
+                (price-str (string-trim (or (org-table-get nil 4) ""))))
+            (if (string= product "TOTAL")
+                (setq total-line (org-table-current-line))
+              ;; Data row (skip header by checking for valid date format)
+              (when (string-match-p "^[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}$" date)
+                ;; Track unique dates
+                (puthash date t dates)
+                ;; Sum counts
+                (unless (string-empty-p count-str)
+                  (setq total-count (+ total-count (string-to-number count-str))))
+                ;; Sum prices (price * count)
+                (unless (string-empty-p price-str)
+                  (let ((count (if (string-empty-p count-str) 1
+                                 (string-to-number count-str)))
+                        (price (string-to-number price-str)))
+                    (setq total-price (+ total-price (* count price)))))))))
+        (forward-line 1))
+      ;; Calculate unique days
+      (let ((unique-days (hash-table-count dates)))
+        ;; Update or create TOTAL row
+        (if total-line
+            ;; Update existing TOTAL row
+            (progn
+              (org-table-goto-line total-line)
+              (org-table-put nil 2 (number-to-string unique-days))
+              (org-table-put nil 3 (number-to-string total-count))
+              (org-table-put nil 4 (format "%.2f" total-price)))
+          ;; Create TOTAL row at end of table
+          (goto-char table-start)
+          (while (and (org-at-table-p) (not (eobp)))
+            (forward-line 1))
+          (forward-line -1)
+          (end-of-line)
+          (insert "\n|--------+------+-------+-------|")
+          (insert (format "\n| TOTAL | %d | %d | %.2f |"
+                          unique-days total-count total-price)))
+        (org-table-align)))))
+
+;;;###autoload
+(defun org-shop-recalculate-history ()
+  "Recalculate TOTAL row in history table of current shop file.
+Shows: unique days shopped, total item count, total spent."
+  (interactive)
+  (save-excursion
+    (if (org-shop--goto-table-after-heading org-shop-history-heading)
+        (progn
+          (org-shop--recalculate-history-total)
+          (message "History TOTAL recalculated"))
+      (user-error "No history table found"))))
 
 ;;;###autoload
 (defun org-shop-sync ()
