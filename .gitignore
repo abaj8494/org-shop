@@ -1,0 +1,16 @@
+# Byte-compiled files
+*.elc
+
+# Package archives
+*.tar
+
+# Backup files
+*~
+\#*\#
+.\#*
+
+# Auto-save files
+.saves
+
+# Desktop/system files
+.DS_Store
