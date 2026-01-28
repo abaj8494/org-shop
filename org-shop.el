@@ -244,7 +244,7 @@ Returns point if found, nil otherwise."
   (goto-char (point-min))
   (let ((case-fold-search t))
     (when (re-search-forward
-           (concat "^\\*+\\s-+" (regexp-quote heading-name) "\\s-*$")
+           (concat "^\\*+\\s-+" (regexp-quote heading-name) "\\(\\s-\\|:\\)")
            nil t)
       (beginning-of-line)
       (point))))
