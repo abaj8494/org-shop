@@ -705,8 +705,8 @@ Updates: done count, total count, discount, known_price sum, price diff."
   (unless (org-at-table-p)
     (user-error "Not in an org table"))
   (save-excursion
-    ;; Find the summary row (last data row)
-    (org-table-goto-line 1)
+    ;; Start from line 2 to skip header
+    (org-table-goto-line 2)
     (let ((marked 0) (unmarked 0)
           (total-count 0)
           (total-discount 0.0)
@@ -719,34 +719,36 @@ Updates: done count, total count, discount, known_price sum, price diff."
           (let ((product (string-trim (or (org-table-get nil 1) ""))))
             (if (string= product "Summary")
                 (setq summary-line (org-table-current-line))
-              ;; Data row - collect stats
+              ;; Data row - collect stats (only rows with checkbox format)
               (let ((done (string-trim (or (org-table-get nil 2) "")))
                     (count-str (string-trim (or (org-table-get nil 3) "")))
                     (disc-str (string-trim (or (org-table-get nil 4) "")))
                     (known-str (string-trim (or (org-table-get nil 6) "")))
                     (new-str (string-trim (or (org-table-get nil 7) ""))))
-                ;; Count marked/unmarked
-                (if (string-match-p "X" done)
-                    (cl-incf marked)
-                  (cl-incf unmarked))
-                ;; Sum counts
-                (unless (string-empty-p count-str)
-                  (setq total-count (+ total-count (string-to-number count-str))))
-                ;; Sum known prices
-                (unless (string-empty-p known-str)
-                  (setq total-known (+ total-known (string-to-number known-str))))
-                ;; Calculate discount (rate * price)
-                (when (and (not (string-empty-p disc-str))
-                           (not (string-empty-p known-str)))
-                  (setq total-discount (+ total-discount
-                                          (* (string-to-number disc-str)
-                                             (string-to-number known-str)))))
-                ;; Calculate diff (new - known)
-                (when (not (string-empty-p new-str))
-                  (let ((known (if (string-empty-p known-str) 0
-                                 (string-to-number known-str)))
-                        (new (string-to-number new-str)))
-                    (setq total-diff (+ total-diff (- new known)))))))))
+                ;; Only process rows with checkbox format [ ] or [X]
+                (when (string-match-p "\\[.\\]" done)
+                  ;; Count marked/unmarked
+                  (if (string-match-p "X" done)
+                      (cl-incf marked)
+                    (cl-incf unmarked))
+                  ;; Sum counts
+                  (unless (string-empty-p count-str)
+                    (setq total-count (+ total-count (string-to-number count-str))))
+                  ;; Sum known prices
+                  (unless (string-empty-p known-str)
+                    (setq total-known (+ total-known (string-to-number known-str))))
+                  ;; Calculate discount (rate * price)
+                  (when (and (not (string-empty-p disc-str))
+                             (not (string-empty-p known-str)))
+                    (setq total-discount (+ total-discount
+                                            (* (string-to-number disc-str)
+                                               (string-to-number known-str)))))
+                  ;; Calculate diff (new - known)
+                  (when (not (string-empty-p new-str))
+                    (let ((known (if (string-empty-p known-str) 0
+                                   (string-to-number known-str)))
+                          (new (string-to-number new-str)))
+                      (setq total-diff (+ total-diff (- new known))))))))))
         (forward-line 1))
       ;; Update summary row
       (when summary-line
