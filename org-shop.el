@@ -398,12 +398,7 @@ Includes summary row with aggregation formulas."
     (insert (format "| Summary | %dU 0M |  |  | - | %.2f | +0.00 |\n"
                     num-items total-known))
     ;; Align table
-    (org-table-align)
-    ;; Add table formulas for dynamic recalculation
-    (end-of-line)
-    (insert "\n#+TBLFM: @>$2='(org-shop--summary-done-count $2)::@>$3='(org-shop--summary-count $3)")
-    (insert "::@>$4='(org-shop--summary-discount $4 $6)::@>$6='(org-shop--summary-known-price $6)")
-    (insert "::@>$7='(org-shop--summary-diff $6 $7)")))
+    (org-table-align)))
 
 ;;; ============================================================================
 ;;; Summary Row Calculation Functions (for #+TBLFM)
@@ -702,12 +697,77 @@ Re-syncing is safe - updates existing entries instead of creating duplicates."
 ;;; Keymap Setup
 ;;; ============================================================================
 
+;;;###autoload
+(defun org-shop-recalculate ()
+  "Recalculate the summary row in current shopping list table.
+Updates: done count, total count, discount, known_price sum, price diff."
+  (interactive)
+  (unless (org-at-table-p)
+    (user-error "Not in an org table"))
+  (save-excursion
+    ;; Find the summary row (last data row)
+    (org-table-goto-line 1)
+    (let ((marked 0) (unmarked 0)
+          (total-count 0)
+          (total-discount 0.0)
+          (total-known 0.0)
+          (total-diff 0.0)
+          (summary-line nil))
+      ;; Iterate through table rows
+      (while (and (org-at-table-p) (not (eobp)))
+        (unless (org-at-table-hline-p)
+          (let ((product (string-trim (or (org-table-get nil 1) ""))))
+            (if (string= product "Summary")
+                (setq summary-line (org-table-current-line))
+              ;; Data row - collect stats
+              (let ((done (string-trim (or (org-table-get nil 2) "")))
+                    (count-str (string-trim (or (org-table-get nil 3) "")))
+                    (disc-str (string-trim (or (org-table-get nil 4) "")))
+                    (known-str (string-trim (or (org-table-get nil 6) "")))
+                    (new-str (string-trim (or (org-table-get nil 7) ""))))
+                ;; Count marked/unmarked
+                (if (string-match-p "X" done)
+                    (cl-incf marked)
+                  (cl-incf unmarked))
+                ;; Sum counts
+                (unless (string-empty-p count-str)
+                  (setq total-count (+ total-count (string-to-number count-str))))
+                ;; Sum known prices
+                (unless (string-empty-p known-str)
+                  (setq total-known (+ total-known (string-to-number known-str))))
+                ;; Calculate discount (rate * price)
+                (when (and (not (string-empty-p disc-str))
+                           (not (string-empty-p known-str)))
+                  (setq total-discount (+ total-discount
+                                          (* (string-to-number disc-str)
+                                             (string-to-number known-str)))))
+                ;; Calculate diff (new - known)
+                (when (not (string-empty-p new-str))
+                  (let ((known (if (string-empty-p known-str) 0
+                                 (string-to-number known-str)))
+                        (new (string-to-number new-str)))
+                    (setq total-diff (+ total-diff (- new known)))))))))
+        (forward-line 1))
+      ;; Update summary row
+      (when summary-line
+        (org-table-goto-line summary-line)
+        (org-table-put nil 2 (format "%dU %dM" unmarked marked))
+        (org-table-put nil 3 (if (zerop total-count) "" (number-to-string total-count)))
+        (org-table-put nil 4 (if (zerop total-discount) "" (format "%.2f" total-discount)))
+        (org-table-put nil 6 (format "%.2f" total-known))
+        (org-table-put nil 7 (format "%s%.2f" (if (>= total-diff 0) "+" "") total-diff))
+        (org-table-align)
+        (message "Summary recalculated: %dU %dM, total: %.2f, diff: %s%.2f"
+                 unmarked marked total-known
+                 (if (>= total-diff 0) "+" "") total-diff)))))
+
 (defvar org-shop-command-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "m") #'org-shop-mark)
     (define-key map (kbd "g") #'org-shop-generate)
     (define-key map (kbd "s") #'org-shop-sync)
     (define-key map (kbd "c") #'org-shop-clear-marks)
+    (define-key map (kbd "r") #'org-shop-recalculate)
     map)
   "Command map for org-shop.
 \\{org-shop-command-map}")
@@ -719,7 +779,8 @@ Binds commands under `org-shop-keymap-prefix' (default C-c S):
   <prefix> m - Toggle mark (next in shop, done in daily)
   <prefix> g - Generate shopping list
   <prefix> s - Sync prices back to shop
-  <prefix> c - Clear all marks"
+  <prefix> c - Clear all marks
+  <prefix> r - Recalculate summary row"
   (interactive)
   (when org-shop-setup-keymaps
     (global-set-key (kbd org-shop-keymap-prefix) org-shop-command-map))
