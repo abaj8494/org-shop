@@ -22,11 +22,11 @@
 ;;   (require 'org-shop)
 ;;   (org-shop-setup)
 ;;
-;; Keybindings (C-c d prefix):
-;;   C-c d m - Mark/unmark items in shop file
-;;   C-c d g - Generate shopping list from marked items
-;;   C-c d s - Sync prices back to shop file
-;;   C-c d c - Clear all marks in current shop file
+;; Keybindings (C-c d g prefix):
+;;   C-c d g m - Toggle mark (next in shop files, done in daily files)
+;;   C-c d g g - Generate shopping list from marked items
+;;   C-c d g s - Sync prices back to shop file
+;;   C-c d g c - Clear all marks in current shop file
 
 ;;; Code:
 
@@ -264,47 +264,58 @@ Returns point at start of table, or nil if not found."
 ;;; Core Functions - Marking
 ;;; ============================================================================
 
-(defun org-shop--is-marked-p ()
-  "Return non-nil if current row is marked."
-  (let ((next-val (org-shop--get-cell "next")))
-    (and next-val
-         (string-match-p (regexp-quote org-shop--mark-char) next-val))))
+(defun org-shop--has-column-p (column-name)
+  "Return non-nil if current table has COLUMN-NAME."
+  (let ((columns (org-shop--get-table-columns)))
+    (cl-find column-name columns :test #'string-equal-ignore-case)))
 
-(defun org-shop--mark-row ()
-  "Mark current row (set next column to [X])."
-  (org-shop--set-cell "next" (format "[%s]" org-shop--mark-char)))
+(defun org-shop--is-marked-p (&optional column)
+  "Return non-nil if current row is marked in COLUMN (default \"next\")."
+  (let ((val (org-shop--get-cell (or column "next"))))
+    (and val
+         (string-match-p (regexp-quote org-shop--mark-char) val))))
 
-(defun org-shop--unmark-row ()
-  "Unmark current row (set next column to [ ])."
-  (org-shop--set-cell "next" "[ ]"))
+(defun org-shop--mark-row (&optional column)
+  "Mark current row (set COLUMN to [X], default \"next\")."
+  (org-shop--set-cell (or column "next") (format "[%s]" org-shop--mark-char)))
 
-(defun org-shop--toggle-mark ()
-  "Toggle mark on current row."
-  (if (org-shop--is-marked-p)
-      (org-shop--unmark-row)
-    (org-shop--mark-row)))
+(defun org-shop--unmark-row (&optional column)
+  "Unmark current row (set COLUMN to [ ], default \"next\")."
+  (org-shop--set-cell (or column "next") "[ ]"))
+
+(defun org-shop--toggle-mark (&optional column)
+  "Toggle mark on current row in COLUMN (default \"next\")."
+  (if (org-shop--is-marked-p column)
+      (org-shop--unmark-row column)
+    (org-shop--mark-row column)))
 
 ;;;###autoload
 (defun org-shop-mark ()
   "Toggle mark on current table row or rows in region.
-In shop files, marks items for the next shopping trip."
+In shop files (with \"next\" column), marks items for shopping.
+In daily files (with \"done\" column), marks items as done."
   (interactive)
   (unless (org-shop--at-table-p)
     (user-error "Not in an org table"))
-  (if (use-region-p)
-      ;; Handle region
-      (let ((beg (region-beginning))
-            (end (region-end)))
-        (save-excursion
-          (goto-char beg)
-          (while (< (point) end)
-            (when (and (org-at-table-p)
-                       (not (org-at-table-hline-p)))
-              (org-shop--toggle-mark))
-            (forward-line 1))))
-    ;; Single row
-    (org-shop--toggle-mark))
-  (message "Mark toggled"))
+  ;; Determine which column to toggle based on table structure
+  (let ((column (cond
+                 ((org-shop--has-column-p "next") "next")
+                 ((org-shop--has-column-p "done") "done")
+                 (t (user-error "Table has no 'next' or 'done' column")))))
+    (if (use-region-p)
+        ;; Handle region
+        (let ((beg (region-beginning))
+              (end (region-end)))
+          (save-excursion
+            (goto-char beg)
+            (while (< (point) end)
+              (when (and (org-at-table-p)
+                         (not (org-at-table-hline-p)))
+                (org-shop--toggle-mark column))
+              (forward-line 1))))
+      ;; Single row
+      (org-shop--toggle-mark column))
+    (message "%s toggled" (capitalize column))))
 
 ;;;###autoload
 (defun org-shop-clear-marks ()
@@ -497,11 +508,16 @@ Also appends to price history."
 
 ;;;###autoload
 (defun org-shop-setup ()
-  "Setup org-shop with default keybindings."
+  "Setup org-shop with default keybindings.
+Binds commands under C-c d g prefix:
+  C-c d g m - Toggle mark (next in shop, done in daily)
+  C-c d g g - Generate shopping list
+  C-c d g s - Sync prices back to shop
+  C-c d g c - Clear all marks"
   (interactive)
   (when org-shop-setup-keymaps
-    (global-set-key (kbd "C-c d") org-shop-command-map))
-  (message "org-shop: Initialized (C-c d prefix)"))
+    (global-set-key (kbd "C-c d g") org-shop-command-map))
+  (message "org-shop: Initialized (C-c d g prefix)"))
 
 ;;; ============================================================================
 ;;; Minor Mode (Optional)
@@ -512,7 +528,7 @@ Also appends to price history."
   "Minor mode for org-shop shopping list management."
   :lighter " Shop"
   :keymap (let ((map (make-sparse-keymap)))
-            (define-key map (kbd "C-c d") org-shop-command-map)
+            (define-key map (kbd "C-c d g") org-shop-command-map)
             map)
   :group 'org-shop)
 
