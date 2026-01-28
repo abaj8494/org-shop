@@ -457,18 +457,25 @@ COUNT is how many were purchased, PRICE is the price paid."
   (with-current-buffer (find-file-noselect shop-file)
     (save-excursion
       (org-shop--ensure-history-table shop-file)
-      (when (org-shop--goto-table-after-heading org-shop-history-heading)
-        ;; Go to end of table
-        (while (and (org-at-table-p) (not (eobp)))
-          (forward-line 1))
-        (forward-line -1)
-        (end-of-line)
-        (insert (format "\n| %s | %s | %s | %s |"
-                        product
-                        (format-time-string "%Y-%m-%d")
-                        (or count "1")
-                        price))
-        (org-table-align)))))
+      ;; Find the history heading directly
+      (goto-char (point-min))
+      (when (re-search-forward
+             (concat "^\\*+\\s-+" (regexp-quote org-shop-history-heading) "\\(\\s-\\|:\\)")
+             nil t)
+        ;; Find the table under this heading
+        (when (re-search-forward "^\\s-*|" nil t)
+          (beginning-of-line)
+          ;; Go to end of table
+          (while (and (org-at-table-p) (not (eobp)))
+            (forward-line 1))
+          (forward-line -1)
+          (end-of-line)
+          (insert (format "\n| %s | %s | %s | %s |"
+                          product
+                          (format-time-string "%Y-%m-%d")
+                          (or count "1")
+                          price))
+          (org-table-align))))))
 
 ;;;###autoload
 (defun org-shop-sync ()
