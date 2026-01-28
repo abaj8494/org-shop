@@ -164,16 +164,26 @@ E.g., `** TODO Aldi Run' -> \"aldi\", `** Woolworths Trip' -> \"woolworths\"."
   "Return non-nil if point is inside an org table."
   (org-at-table-p))
 
+(defun org-shop--get-row-fields ()
+  "Get fields from current table row as list of strings."
+  (when (org-at-table-p)
+    (let ((line (buffer-substring-no-properties
+                 (line-beginning-position)
+                 (line-end-position))))
+      ;; Split by | and remove first/last empty elements
+      (let ((fields (split-string line "|")))
+        (when (> (length fields) 2)
+          (mapcar #'string-trim (butlast (cdr fields))))))))
+
 (defun org-shop--get-table-columns ()
   "Get column names from table header row.
 Returns list of column names."
   (save-excursion
     (org-table-goto-line 1)
-    (let ((fields (org-table-get-fields)))
-      (mapcar #'string-trim fields))))
+    (org-shop--get-row-fields)))
 
 (defun org-shop--column-index (column-name)
-  "Return 1-based index of COLUMN-NAME in current table, or nil."
+  "Return 0-based index of COLUMN-NAME in current table, or nil."
   (let ((columns (org-shop--get-table-columns)))
     (cl-position column-name columns :test #'string-equal-ignore-case)))
 
@@ -181,7 +191,7 @@ Returns list of column names."
   "Get value of cell in COLUMN-NAME for current row."
   (let ((col-idx (org-shop--column-index column-name)))
     (when col-idx
-      (string-trim (org-table-get nil (1+ col-idx))))))
+      (string-trim (or (org-table-get nil (1+ col-idx)) "")))))
 
 (defun org-shop--set-cell (column-name value)
   "Set cell in COLUMN-NAME to VALUE for current row."
@@ -210,7 +220,7 @@ Each alist represents a row with (column-name . value) pairs."
         (rows '()))
     (dolist (line-num (org-shop--table-data-lines))
       (org-table-goto-line line-num)
-      (let ((fields (mapcar #'string-trim (org-table-get-fields)))
+      (let ((fields (org-shop--get-row-fields))
             (row '()))
         (cl-loop for col in columns
                  for val in fields
