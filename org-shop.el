@@ -22,11 +22,11 @@
 ;;   (require 'org-shop)
 ;;   (org-shop-setup)
 ;;
-;; Keybindings (C-c d g prefix):
-;;   C-c d g m - Toggle mark (next in shop files, done in daily files)
-;;   C-c d g g - Generate shopping list from marked items
-;;   C-c d g s - Sync prices back to shop file
-;;   C-c d g c - Clear all marks in current shop file
+;; Keybindings (default C-c S prefix, customizable via org-shop-keymap-prefix):
+;;   C-c S m - Toggle mark (next in shop files, done in daily files)
+;;   C-c S g - Generate shopping list from marked items
+;;   C-c S s - Sync prices back to shop file
+;;   C-c S c - Clear all marks in current shop file
 
 ;;; Code:
 
@@ -82,6 +82,12 @@ If nil, prompt user to select shop."
 (defcustom org-shop-setup-keymaps t
   "Whether to setup default keymaps on load."
   :type 'boolean
+  :group 'org-shop)
+
+(defcustom org-shop-keymap-prefix "C-c S"
+  "Prefix key for org-shop commands.
+Change this if the default conflicts with other bindings."
+  :type 'string
   :group 'org-shop)
 
 ;;; ============================================================================
@@ -509,15 +515,15 @@ Also appends to price history."
 ;;;###autoload
 (defun org-shop-setup ()
   "Setup org-shop with default keybindings.
-Binds commands under C-c d g prefix:
-  C-c d g m - Toggle mark (next in shop, done in daily)
-  C-c d g g - Generate shopping list
-  C-c d g s - Sync prices back to shop
-  C-c d g c - Clear all marks"
+Binds commands under `org-shop-keymap-prefix' (default C-c S):
+  <prefix> m - Toggle mark (next in shop, done in daily)
+  <prefix> g - Generate shopping list
+  <prefix> s - Sync prices back to shop
+  <prefix> c - Clear all marks"
   (interactive)
   (when org-shop-setup-keymaps
-    (global-set-key (kbd "C-c d g") org-shop-command-map))
-  (message "org-shop: Initialized (C-c d g prefix)"))
+    (global-set-key (kbd org-shop-keymap-prefix) org-shop-command-map))
+  (message "org-shop: Initialized (%s prefix)" org-shop-keymap-prefix))
 
 ;;; ============================================================================
 ;;; Minor Mode (Optional)
@@ -528,7 +534,7 @@ Binds commands under C-c d g prefix:
   "Minor mode for org-shop shopping list management."
   :lighter " Shop"
   :keymap (let ((map (make-sparse-keymap)))
-            (define-key map (kbd "C-c d g") org-shop-command-map)
+            (define-key map (kbd org-shop-keymap-prefix) org-shop-command-map)
             map)
   :group 'org-shop)
 
