@@ -58,8 +58,8 @@
   :type 'string
   :group 'org-shop)
 
-(defcustom org-shop-history-heading "price history"
-  "Heading name for price history table."
+(defcustom org-shop-history-heading "history"
+  "Heading name for purchase history table."
   :type 'string
   :group 'org-shop)
 
@@ -432,7 +432,7 @@ Returns list of alists with shopping data."
             (cl-return t)))))))
 
 (defun org-shop--ensure-history-table (shop-file)
-  "Ensure price history table exists in SHOP-FILE.
+  "Ensure purchase history table exists in SHOP-FILE.
 Creates it if missing. Returns point at history table."
   (with-current-buffer (find-file-noselect shop-file)
     (save-excursion
@@ -446,13 +446,14 @@ Creates it if missing. Returns point at history table."
           (when (org-shop--goto-heading org-shop-source-heading)
             (org-end-of-subtree)
             (insert "\n\n*** " org-shop-history-heading "                                        :noexport:\n")
-            (insert "| product | date | price |\n")
-            (insert "|---------+------+-------|\n"))))
+            (insert "| product | date | count | price |\n")
+            (insert "|---------+------+-------+-------|\n"))))
       ;; Return to history table
       (org-shop--goto-table-after-heading org-shop-history-heading))))
 
-(defun org-shop--append-history (shop-file product price)
-  "Append price history entry for PRODUCT at PRICE to SHOP-FILE."
+(defun org-shop--append-history (shop-file product count price)
+  "Append purchase history entry for PRODUCT to SHOP-FILE.
+COUNT is how many were purchased, PRICE is the price paid."
   (with-current-buffer (find-file-noselect shop-file)
     (save-excursion
       (org-shop--ensure-history-table shop-file)
@@ -462,41 +463,50 @@ Creates it if missing. Returns point at history table."
           (forward-line 1))
         (forward-line -1)
         (end-of-line)
-        (insert (format "\n| %s | %s | %s |"
+        (insert (format "\n| %s | %s | %s | %s |"
                         product
                         (format-time-string "%Y-%m-%d")
+                        (or count "1")
                         price))
         (org-table-align)))))
 
 ;;;###autoload
 (defun org-shop-sync ()
-  "Sync prices from shopping list back to shop file.
-Updates prices where new_price differs from known_price.
-Also appends to price history."
+  "Sync shopping list back to shop file.
+For done items [X]: logs purchase to history (product, date, count, price).
+For items with new_price: updates price in shop file."
   (interactive)
   (unless (org-shop--at-table-p)
     (user-error "Not in an org table"))
   (let* ((shop-name (org-shop--resolve-shop))
          (shop-file (org-shop--find-shop-file shop-name))
          (rows (org-shop--parse-shopping-table))
-         (updated 0))
+         (logged 0)
+         (price-updated 0))
     (dolist (row rows)
-      (let ((product (cdr (assoc "product" row)))
+      (let ((done (cdr (assoc "done" row)))
+            (product (cdr (assoc "product" row)))
+            (count (cdr (assoc "count" row)))
             (known-price (cdr (assoc "known_price" row)))
             (new-price (cdr (assoc "new_price" row))))
-        ;; Only sync if new_price is filled and different
+        ;; Log to history if item is marked done
+        (when (and done (string-match-p "X" done))
+          (let ((price (if (and new-price (not (string-empty-p new-price)))
+                           new-price
+                         known-price)))
+            (org-shop--append-history shop-file product count price)
+            (cl-incf logged)))
+        ;; Update price in shop file if new_price differs
         (when (and new-price
                    (not (string-empty-p new-price))
                    (not (string-equal new-price known-price)))
           (org-shop--update-price-in-shop shop-file product new-price)
-          (org-shop--append-history shop-file product new-price)
-          (cl-incf updated))))
+          (cl-incf price-updated))))
     ;; Save shop file
     (with-current-buffer (find-file-noselect shop-file)
       (save-buffer))
-    (if (zerop updated)
-        (message "No price changes to sync")
-      (message "Synced %d price update(s) to %s" updated shop-name))))
+    (message "Synced: %d purchase(s) logged, %d price(s) updated in %s"
+             logged price-updated shop-name)))
 
 ;;; ============================================================================
 ;;; Keymap Setup
