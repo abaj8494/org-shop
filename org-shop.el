@@ -451,37 +451,101 @@ Creates it if missing. Returns point at history table."
       ;; Return to history table
       (org-shop--goto-table-after-heading org-shop-history-heading))))
 
-(defun org-shop--append-history (shop-file product count price)
-  "Append purchase history entry for PRODUCT to SHOP-FILE.
-COUNT is how many were purchased, PRICE is the price paid."
-  (with-current-buffer (find-file-noselect shop-file)
-    (save-excursion
-      (org-shop--ensure-history-table shop-file)
-      ;; Find the history heading directly
-      (goto-char (point-min))
-      (when (re-search-forward
-             (concat "^\\*+\\s-+" (regexp-quote org-shop-history-heading) "\\(\\s-\\|:\\)")
-             nil t)
-        ;; Find the table under this heading
-        (when (re-search-forward "^\\s-*|" nil t)
-          (beginning-of-line)
-          ;; Go to end of table
-          (while (and (org-at-table-p) (not (eobp)))
-            (forward-line 1))
-          (forward-line -1)
-          (end-of-line)
-          (insert (format "\n| %s | %s | %s | %s |"
-                          product
-                          (format-time-string "%Y-%m-%d")
-                          (or count "1")
-                          price))
-          (org-table-align))))))
+(defun org-shop--find-history-entry (product date)
+  "Find history table row matching PRODUCT and DATE.
+Returns line number if found, nil otherwise.
+Point must be at start of history table."
+  (let ((found nil)
+        (table-start (point)))
+    (while (and (not found) (org-at-table-p) (not (eobp)))
+      (unless (org-at-table-hline-p)
+        (let ((row-product (string-trim (or (org-table-get nil 1) "")))
+              (row-date (string-trim (or (org-table-get nil 2) ""))))
+          (when (and (string-equal-ignore-case row-product product)
+                     (string-equal row-date date))
+            (setq found (line-number-at-pos)))))
+      (forward-line 1))
+    (goto-char table-start)
+    found))
+
+(defun org-shop--delete-table-row ()
+  "Delete the current table row."
+  (beginning-of-line)
+  (let ((start (point)))
+    (forward-line 1)
+    (delete-region start (point)))
+  (org-table-align))
+
+(defun org-shop--upsert-history (shop-file product count price)
+  "Upsert purchase history entry for PRODUCT to SHOP-FILE.
+If entry for PRODUCT + today exists: update count/price.
+If count is 0 or empty: remove entry.
+Otherwise: insert new row."
+  (let ((date (format-time-string "%Y-%m-%d"))
+        (count-num (if (and count (not (string-empty-p count)))
+                       (string-to-number count)
+                     1)))
+    (with-current-buffer (find-file-noselect shop-file)
+      (save-excursion
+        (org-shop--ensure-history-table shop-file)
+        ;; Find the history heading
+        (goto-char (point-min))
+        (when (re-search-forward
+               (concat "^\\*+\\s-+" (regexp-quote org-shop-history-heading) "\\(\\s-\\|:\\)")
+               nil t)
+          ;; Find the table
+          (when (re-search-forward "^\\s-*|" nil t)
+            (beginning-of-line)
+            ;; Skip header and hline
+            (forward-line 1)
+            (when (org-at-table-hline-p)
+              (forward-line 1))
+            (let ((existing-line (org-shop--find-history-entry product date)))
+              (cond
+               ;; Entry exists and count > 0: update it
+               ((and existing-line (> count-num 0))
+                (goto-char (point-min))
+                (forward-line (1- existing-line))
+                (org-table-put nil 3 (number-to-string count-num))
+                (org-table-put nil 4 price)
+                (org-table-align))
+               ;; Entry exists and count = 0: remove it
+               ((and existing-line (<= count-num 0))
+                (goto-char (point-min))
+                (forward-line (1- existing-line))
+                (org-shop--delete-table-row))
+               ;; No entry and count > 0: insert new row
+               ((> count-num 0)
+                ;; Go to end of table
+                (goto-char (point-min))
+                (re-search-forward
+                 (concat "^\\*+\\s-+" (regexp-quote org-shop-history-heading) "\\(\\s-\\|:\\)")
+                 nil t)
+                (re-search-forward "^\\s-*|" nil t)
+                (beginning-of-line)
+                (while (and (org-at-table-p) (not (eobp)))
+                  (forward-line 1))
+                (forward-line -1)
+                (end-of-line)
+                (insert (format "\n| %s | %s | %s | %s |"
+                                product
+                                date
+                                count-num
+                                price))
+                (org-table-align))
+               ;; No entry and count = 0: do nothing
+               (t nil)))))))))
+
+;; Keep old name as alias for compatibility
+(defalias 'org-shop--append-history 'org-shop--upsert-history)
 
 ;;;###autoload
 (defun org-shop-sync ()
   "Sync shopping list back to shop file.
-For done items [X]: logs purchase to history (product, date, count, price).
-For items with new_price: updates price in shop file."
+For done items [X]: upserts purchase to history (product, date, count, price).
+For not-done items [ ]: removes from history if previously synced.
+For items with new_price: updates price in shop file.
+Re-syncing is safe - updates existing entries instead of creating duplicates."
   (interactive)
   (unless (org-shop--at-table-p)
     (user-error "Not in an org table"))
@@ -489,6 +553,7 @@ For items with new_price: updates price in shop file."
          (shop-file (org-shop--find-shop-file shop-name))
          (rows (org-shop--parse-shopping-table))
          (logged 0)
+         (removed 0)
          (price-updated 0))
     (dolist (row rows)
       (let ((done (cdr (assoc "done" row)))
@@ -496,13 +561,19 @@ For items with new_price: updates price in shop file."
             (count (cdr (assoc "count" row)))
             (known-price (cdr (assoc "known_price" row)))
             (new-price (cdr (assoc "new_price" row))))
-        ;; Log to history if item is marked done
-        (when (and done (string-match-p "X" done))
-          (let ((price (if (and new-price (not (string-empty-p new-price)))
-                           new-price
-                         known-price)))
-            (org-shop--append-history shop-file product count price)
-            (cl-incf logged)))
+        ;; Determine effective price
+        (let ((price (if (and new-price (not (string-empty-p new-price)))
+                         new-price
+                       known-price)))
+          ;; Upsert to history based on done status
+          (if (and done (string-match-p "X" done))
+              ;; Done: upsert with count (or 1 if empty)
+              (progn
+                (org-shop--upsert-history shop-file product count price)
+                (cl-incf logged))
+            ;; Not done: upsert with count=0 to remove from history
+            (org-shop--upsert-history shop-file product "0" price)
+            (cl-incf removed)))
         ;; Update price in shop file if new_price differs
         (when (and new-price
                    (not (string-empty-p new-price))
@@ -512,8 +583,8 @@ For items with new_price: updates price in shop file."
     ;; Save shop file
     (with-current-buffer (find-file-noselect shop-file)
       (save-buffer))
-    (message "Synced: %d purchase(s) logged, %d price(s) updated in %s"
-             logged price-updated shop-name)))
+    (message "Synced to %s: %d logged, %d removed, %d price(s) updated"
+             shop-name logged removed price-updated)))
 
 ;;; ============================================================================
 ;;; Keymap Setup
