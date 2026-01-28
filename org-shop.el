@@ -528,7 +528,8 @@ Returns list of alists with shopping data."
     (org-shop--parse-table)))
 
 (defun org-shop--update-price-in-shop (shop-file product new-price)
-  "Update PRODUCT's price to NEW-PRICE in SHOP-FILE."
+  "Update PRODUCT's price to NEW-PRICE in SHOP-FILE.
+Returns t if product was found and updated, nil otherwise."
   (with-current-buffer (find-file-noselect shop-file)
     (save-excursion
       (when (org-shop--goto-table-after-heading org-shop-source-heading)
@@ -537,6 +538,49 @@ Returns list of alists with shopping data."
           (when (string-equal-ignore-case (org-shop--get-cell "product") product)
             (org-shop--set-cell "price" new-price)
             (cl-return t)))))))
+
+(defun org-shop--product-exists-in-shop-p (shop-file product)
+  "Check if PRODUCT exists in SHOP-FILE's regular table."
+  (with-current-buffer (find-file-noselect shop-file)
+    (save-excursion
+      (when (org-shop--goto-table-after-heading org-shop-source-heading)
+        (cl-loop for line-num in (org-shop--table-data-lines)
+                 do (org-table-goto-line line-num)
+                 when (string-equal-ignore-case (org-shop--get-cell "product") product)
+                 return t)))))
+
+(defun org-shop--add-product-to-shop (shop-file product price)
+  "Add new PRODUCT with PRICE to SHOP-FILE's regular table.
+Inserts before any TOTAL row or at end of table data."
+  (with-current-buffer (find-file-noselect shop-file)
+    (save-excursion
+      (when (org-shop--goto-table-after-heading org-shop-source-heading)
+        ;; Skip header
+        (forward-line 1)
+        (when (org-at-table-hline-p)
+          (forward-line 1))
+        ;; Find insertion point (before hline/TOTAL or end of data)
+        (let ((insert-point nil))
+          (while (and (org-at-table-p) (not (eobp)))
+            (let ((first-col (string-trim (or (org-table-get nil 1) ""))))
+              (if (or (org-at-table-hline-p)
+                      (string-match-p "^TOTAL$\\|^$" first-col))
+                  ;; Found hline or TOTAL/empty - insert before
+                  (progn
+                    (forward-line -1)
+                    (end-of-line)
+                    (setq insert-point (point))
+                    (goto-char (point-max))) ; exit loop
+                (setq insert-point (progn (end-of-line) (point)))
+                (forward-line 1))))
+          (when insert-point
+            (goto-char insert-point)
+            ;; Format: | next | product | price | quantity | last_bought |
+            (insert (format "\n| [ ] | %s | %s |  | %s |"
+                            product
+                            (or price "")
+                            (format-time-string "%Y-%m-%d")))
+            (org-table-align)))))))
 
 (defun org-shop--ensure-history-table (shop-file)
   "Ensure purchase history table exists in SHOP-FILE.
@@ -623,23 +667,38 @@ Otherwise: insert new row."
                 (org-shop--delete-table-row))
                ;; No entry and count > 0: insert new row
                ((> count-num 0)
-                ;; Go to end of table
+                ;; Find insertion point: before hline/TOTAL, after last data row
                 (goto-char (point-min))
                 (re-search-forward
                  (concat "^\\*+\\s-+" (regexp-quote org-shop-history-heading) "\\(\\s-\\|:\\)")
                  nil t)
                 (re-search-forward "^\\s-*|" nil t)
                 (beginning-of-line)
-                (while (and (org-at-table-p) (not (eobp)))
+                ;; Skip header
+                (forward-line 1)
+                (when (org-at-table-hline-p)
                   (forward-line 1))
-                (forward-line -1)
-                (end-of-line)
-                (insert (format "\n| %s | %s | %s | %s |"
-                                product
-                                date
-                                count-num
-                                price))
-                (org-table-align))
+                ;; Find last data row (before hline or TOTAL)
+                (let ((insert-point nil))
+                  (while (and (org-at-table-p) (not (eobp)))
+                    (if (or (org-at-table-hline-p)
+                            (string= (string-trim (or (org-table-get nil 1) "")) "TOTAL"))
+                        ;; Found hline or TOTAL - insert before this
+                        (progn
+                          (forward-line -1)
+                          (end-of-line)
+                          (setq insert-point (point))
+                          (goto-char (point-max))) ; exit loop
+                      (setq insert-point (progn (end-of-line) (point)))
+                      (forward-line 1)))
+                  (when insert-point
+                    (goto-char insert-point)
+                    (insert (format "\n| %s | %s | %s | %s |"
+                                    product
+                                    date
+                                    count-num
+                                    price))
+                    (org-table-align))))
                ;; No entry and count = 0: do nothing
                (t nil)))
             ;; Recalculate TOTAL row
@@ -720,6 +779,7 @@ Shows: unique days shopped, total item count, total spent."
 For done items [X]: upserts purchase to history (product, date, count, price).
 For not-done items [ ]: removes from history if previously synced.
 For items with new_price: updates price in shop file.
+For new products (not in shop): adds them to regular table.
 Re-syncing is safe - updates existing entries instead of creating duplicates."
   (interactive)
   (unless (org-shop--at-table-p)
@@ -729,37 +789,44 @@ Re-syncing is safe - updates existing entries instead of creating duplicates."
          (rows (org-shop--parse-shopping-table))
          (logged 0)
          (removed 0)
-         (price-updated 0))
+         (price-updated 0)
+         (products-added 0))
     (dolist (row rows)
       (let ((done (cdr (assoc "done" row)))
             (product (cdr (assoc "product" row)))
             (count (cdr (assoc "count" row)))
             (known-price (cdr (assoc "known_price" row)))
             (new-price (cdr (assoc "new_price" row))))
-        ;; Determine effective price
-        (let ((price (if (and new-price (not (string-empty-p new-price)))
-                         new-price
-                       known-price)))
-          ;; Upsert to history based on done status
-          (if (and done (string-match-p "X" done))
-              ;; Done: upsert with count (or 1 if empty)
-              (progn
-                (org-shop--upsert-history shop-file product count price)
-                (cl-incf logged))
-            ;; Not done: upsert with count=0 to remove from history
-            (org-shop--upsert-history shop-file product "0" price)
-            (cl-incf removed)))
-        ;; Update price in shop file if new_price differs
-        (when (and new-price
-                   (not (string-empty-p new-price))
-                   (not (string-equal new-price known-price)))
-          (org-shop--update-price-in-shop shop-file product new-price)
-          (cl-incf price-updated))))
+        ;; Skip Summary row
+        (unless (string= product "Summary")
+          ;; Determine effective price
+          (let ((price (if (and new-price (not (string-empty-p new-price)))
+                           new-price
+                         known-price)))
+            ;; Check if product exists in shop, add if new
+            (unless (org-shop--product-exists-in-shop-p shop-file product)
+              (org-shop--add-product-to-shop shop-file product price)
+              (cl-incf products-added))
+            ;; Upsert to history based on done status
+            (if (and done (string-match-p "X" done))
+                ;; Done: upsert with count (or 1 if empty)
+                (progn
+                  (org-shop--upsert-history shop-file product count price)
+                  (cl-incf logged))
+              ;; Not done: upsert with count=0 to remove from history
+              (org-shop--upsert-history shop-file product "0" price)
+              (cl-incf removed)))
+          ;; Update price in shop file if new_price differs
+          (when (and new-price
+                     (not (string-empty-p new-price))
+                     (not (string-equal new-price known-price)))
+            (org-shop--update-price-in-shop shop-file product new-price)
+            (cl-incf price-updated)))))
     ;; Save shop file
     (with-current-buffer (find-file-noselect shop-file)
       (save-buffer))
-    (message "Synced to %s: %d logged, %d removed, %d price(s) updated"
-             shop-name logged removed price-updated)))
+    (message "Synced to %s: %d logged, %d removed, %d price(s) updated, %d new product(s)"
+             shop-name logged removed price-updated products-added)))
 
 ;;; ============================================================================
 ;;; Keymap Setup
