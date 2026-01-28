@@ -99,8 +99,9 @@ Change this if the default conflicts with other bindings."
   :type '(repeat string)
   :group 'org-shop)
 
-(defcustom org-shop-dest-columns '("done" "product" "count" "discount" "notes" "known_price" "new_price")
-  "Column names for generated shopping list tables (in order)."
+(defcustom org-shop-dest-columns '("product" "done" "count" "discount" "notes" "known_price" "new_price")
+  "Column names for generated shopping list tables (in order).
+Column order: product first, then done, for better readability."
   :type '(repeat string)
   :group 'org-shop)
 
@@ -372,24 +373,135 @@ Returns list of alists with product data."
     (save-buffer)))
 
 (defun org-shop--insert-shopping-table (rows)
-  "Insert shopping list table with ROWS at point."
-  (let ((header (mapconcat #'identity org-shop-dest-columns " | ")))
-    ;; Insert header
-    (insert "| " header " |\n")
-    (insert "|")
-    (dotimes (_ (length org-shop-dest-columns))
-      (insert "---+"))
-    (delete-char -1)
-    (insert "|\n")
-    ;; Insert rows
+  "Insert shopping list table with ROWS at point.
+Includes summary row with aggregation formulas."
+  (let* ((num-items (length rows))
+         (total-known 0))
+    ;; Calculate initial total
+    (dolist (row rows)
+      (let ((price (cdr (assoc "price" row))))
+        (when (and price (not (string-empty-p price)))
+          (setq total-known (+ total-known (string-to-number price))))))
+    ;; Insert header (new order: product first)
+    (insert "| product | done | count | discount | notes | known_price | new_price |\n")
+    (insert "|---------+------+-------+----------+-------+-------------+-----------|\n")
+    ;; Insert data rows
     (dolist (row rows)
       (let ((product (cdr (assoc "product" row)))
             (price (cdr (assoc "price" row))))
-        (insert (format "| [ ] | %s |  |  |  | %s |  |\n"
+        (insert (format "| %s | [ ] |  |  |  | %s |  |\n"
                         (or product "")
                         (or price "")))))
+    ;; Insert separator before summary
+    (insert "|---------+------+-------+----------+-------+-------------+-----------|\n")
+    ;; Insert summary row with initial values
+    (insert (format "| Summary | %dU 0M |  |  | - | %.2f | +0.00 |\n"
+                    num-items total-known))
     ;; Align table
-    (org-table-align)))
+    (org-table-align)
+    ;; Add table formulas for dynamic recalculation
+    (end-of-line)
+    (insert "\n#+TBLFM: @>$2='(org-shop--summary-done-count $2)::@>$3='(org-shop--summary-count $3)")
+    (insert "::@>$4='(org-shop--summary-discount $4 $6)::@>$6='(org-shop--summary-known-price $6)")
+    (insert "::@>$7='(org-shop--summary-diff $6 $7)")))
+
+;;; ============================================================================
+;;; Summary Row Calculation Functions (for #+TBLFM)
+;;; ============================================================================
+
+(defun org-shop--summary-done-count (_col)
+  "Calculate marked/unmarked count for summary row.
+Returns string like '3U 2M' (3 unmarked, 2 marked)."
+  (let ((marked 0)
+        (unmarked 0))
+    (save-excursion
+      (org-table-goto-line 1)
+      (let ((last-line (1- (org-table-current-line))))
+        (cl-loop for line from 1 to 100  ; safety limit
+                 do (org-table-goto-line line)
+                 while (and (org-at-table-p)
+                            (< (org-table-current-line) last-line))
+                 unless (org-at-table-hline-p)
+                 do (let ((done (string-trim (or (org-table-get nil 2) ""))))
+                      (if (string-match-p "X" done)
+                          (cl-incf marked)
+                        (when (string-match-p "\\[ \\]" done)
+                          (cl-incf unmarked)))))))
+    (format "%dU %dM" unmarked marked)))
+
+(defun org-shop--summary-count (_col)
+  "Calculate sum of count column for summary row."
+  (let ((total 0))
+    (save-excursion
+      (org-table-goto-line 1)
+      (cl-loop for line from 1 to 100
+               do (org-table-goto-line line)
+               while (org-at-table-p)
+               unless (org-at-table-hline-p)
+               do (let* ((val-str (string-trim (or (org-table-get nil 3) "")))
+                         (val (if (string-empty-p val-str) 0
+                                (string-to-number val-str))))
+                    (unless (string= (string-trim (or (org-table-get nil 1) "")) "Summary")
+                      (setq total (+ total val))))))
+    (if (zerop total) "" (number-to-string total))))
+
+(defun org-shop--summary-discount (_disc-col _price-col)
+  "Calculate sum of (discount * known_price) for summary row.
+Discount is a decimal (e.g., 0.1 for 10%)."
+  (let ((total 0.0))
+    (save-excursion
+      (org-table-goto-line 1)
+      (cl-loop for line from 1 to 100
+               do (org-table-goto-line line)
+               while (org-at-table-p)
+               unless (org-at-table-hline-p)
+               do (let* ((disc-str (string-trim (or (org-table-get nil 4) "")))
+                         (price-str (string-trim (or (org-table-get nil 6) "")))
+                         (product-str (string-trim (or (org-table-get nil 1) ""))))
+                    (unless (string= product-str "Summary")
+                      (when (and (not (string-empty-p disc-str))
+                                 (not (string-empty-p price-str)))
+                        (let ((disc (string-to-number disc-str))
+                              (price (string-to-number price-str)))
+                          (setq total (+ total (* disc price)))))))))
+    (if (zerop total) "" (format "%.2f" total))))
+
+(defun org-shop--summary-known-price (_col)
+  "Calculate sum of known_price column for summary row."
+  (let ((total 0.0))
+    (save-excursion
+      (org-table-goto-line 1)
+      (cl-loop for line from 1 to 100
+               do (org-table-goto-line line)
+               while (org-at-table-p)
+               unless (org-at-table-hline-p)
+               do (let* ((val-str (string-trim (or (org-table-get nil 6) "")))
+                         (product-str (string-trim (or (org-table-get nil 1) ""))))
+                    (unless (string= product-str "Summary")
+                      (unless (string-empty-p val-str)
+                        (setq total (+ total (string-to-number val-str))))))))
+    (format "%.2f" total)))
+
+(defun org-shop--summary-diff (_known-col _new-col)
+  "Calculate sum of (new_price - known_price) differences for summary row.
+Only counts rows where new_price is filled. Returns with +/- prefix."
+  (let ((diff 0.0))
+    (save-excursion
+      (org-table-goto-line 1)
+      (cl-loop for line from 1 to 100
+               do (org-table-goto-line line)
+               while (org-at-table-p)
+               unless (org-at-table-hline-p)
+               do (let* ((known-str (string-trim (or (org-table-get nil 6) "")))
+                         (new-str (string-trim (or (org-table-get nil 7) "")))
+                         (product-str (string-trim (or (org-table-get nil 1) ""))))
+                    (unless (string= product-str "Summary")
+                      (when (not (string-empty-p new-str))
+                        (let ((known (if (string-empty-p known-str) 0
+                                       (string-to-number known-str)))
+                              (new (string-to-number new-str)))
+                          (setq diff (+ diff (- new known)))))))))
+    (format "%s%.2f" (if (>= diff 0) "+" "") diff)))
 
 ;;;###autoload
 (defun org-shop-generate ()
