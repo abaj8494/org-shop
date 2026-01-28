@@ -382,6 +382,8 @@ Includes summary row with aggregation formulas."
       (let ((price (cdr (assoc "price" row))))
         (when (and price (not (string-empty-p price)))
           (setq total-known (+ total-known (string-to-number price))))))
+    ;; Insert top hline
+    (insert "|---------+------+-------+----------+-------+-------------+-----------|\n")
     ;; Insert header (new order: product first)
     (insert "| product | done | count | discount | notes | known_price | new_price |\n")
     (insert "|---------+------+-------+----------+-------+-------------+-----------|\n")
@@ -397,6 +399,8 @@ Includes summary row with aggregation formulas."
     ;; Insert summary row with initial values
     (insert (format "| Summary | %dU 0M |  |  | - | %.2f | +0.00 |\n"
                     num-items total-known))
+    ;; Insert bottom hline
+    (insert "|---------+------+-------+----------+-------+-------------+-----------|\n")
     ;; Align table
     (org-table-align)))
 
@@ -597,6 +601,7 @@ Creates it if missing. Returns point at history table."
           (when (org-shop--goto-heading org-shop-source-heading)
             (org-end-of-subtree)
             (insert "\n\n*** " org-shop-history-heading "                                        :noexport:\n")
+            (insert "|---------+------+-------+-------|\n")
             (insert "| product | date | count | price |\n")
             (insert "|---------+------+-------+-------|\n"))))
       ;; Return to history table
@@ -758,7 +763,8 @@ Calculates: unique days shopped, total item count, total price."
           (end-of-line)
           (insert "\n|--------+------+-------+-------|")
           (insert (format "\n| TOTAL | %d | %d | %.2f |"
-                          unique-days total-count total-price)))
+                          unique-days total-count total-price))
+          (insert "\n|--------+------+-------+-------|"))
         (org-table-align)))))
 
 ;;;###autoload
