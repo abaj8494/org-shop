@@ -112,6 +112,15 @@ Column order: product first, then done, for better readability."
 (defvar org-shop--mark-char "X"
   "Character used to mark items (inside brackets).")
 
+(defun org-shop--page-date ()
+  "Extract date from current buffer filename if it matches YYYY-MM-DD.
+Falls back to today's date."
+  (or (when buffer-file-name
+        (let ((name (file-name-nondirectory buffer-file-name)))
+          (when (string-match "\\`\\([0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}\\)" name)
+            (match-string 1 name))))
+      (format-time-string "%Y-%m-%d")))
+
 ;;; ============================================================================
 ;;; Utility Functions - Shop File Discovery
 ;;; ============================================================================
@@ -354,23 +363,24 @@ Returns list of alists with product data."
                     (string-match-p (regexp-quote org-shop--mark-char) next-val))))
            rows))))))
 
-(defun org-shop--clear-marks-in-file (shop-file products)
-  "Clear marks for PRODUCTS in SHOP-FILE and update last_bought."
-  (with-current-buffer (find-file-noselect shop-file)
-    (save-excursion
-      (when (org-shop--goto-table-after-heading org-shop-source-heading)
-        (dolist (line-num (org-shop--table-data-lines))
-          (org-table-goto-line line-num)
-          (let ((product (org-shop--get-cell "product")))
-            (when (member product products)
-              ;; Clear mark
-              (when org-shop-clear-marks-after-generate
-                (org-shop--unmark-row))
-              ;; Update last_bought
-              (when org-shop-update-last-bought
-                (org-shop--set-cell "last_bought"
-                                    (format-time-string "%Y-%m-%d"))))))))
-    (save-buffer)))
+(defun org-shop--clear-marks-in-file (shop-file products &optional date)
+  "Clear marks for PRODUCTS in SHOP-FILE and update last_bought.
+DATE defaults to the page date of the calling buffer."
+  (let ((date (or date (org-shop--page-date))))
+    (with-current-buffer (find-file-noselect shop-file)
+      (save-excursion
+        (when (org-shop--goto-table-after-heading org-shop-source-heading)
+          (dolist (line-num (org-shop--table-data-lines))
+            (org-table-goto-line line-num)
+            (let ((product (org-shop--get-cell "product")))
+              (when (member product products)
+                ;; Clear mark
+                (when org-shop-clear-marks-after-generate
+                  (org-shop--unmark-row))
+                ;; Update last_bought
+                (when org-shop-update-last-bought
+                  (org-shop--set-cell "last_bought" date)))))))
+      (save-buffer))))
 
 (defun org-shop--insert-shopping-table (rows)
   "Insert shopping list table with ROWS at point.
@@ -390,10 +400,14 @@ Includes summary row with aggregation formulas."
     ;; Insert data rows
     (dolist (row rows)
       (let ((product (cdr (assoc "product" row)))
-            (price (cdr (assoc "price" row))))
-        (insert (format "| %s | [ ] |  |  |  | %s |  |\n"
+            (price (cdr (assoc "price" row)))
+            (notes (cdr (assoc "notes" row))))
+        (insert (format "| %s | [ ] |  |  | %s | %s |  |\n"
                         (or product "")
-                        (or price "")))))
+                        (or notes "")
+                        (if (and price (not (string-empty-p price)))
+                            price
+                          "-")))))
     ;; Insert separator before summary
     (insert "|---------+------+-------+----------+-------+-------------+-----------|\n")
     ;; Insert summary row with initial values
@@ -507,7 +521,8 @@ Only counts rows where new_price is filled. Returns with +/- prefix."
   "Generate shopping list from marked items in shop file.
 Inserts table at point with marked products."
   (interactive)
-  (let* ((shop-name (org-shop--resolve-shop))
+  (let* ((date (org-shop--page-date))
+         (shop-name (org-shop--resolve-shop))
          (shop-file (org-shop--find-shop-file shop-name))
          (marked-rows (org-shop--get-marked-rows shop-file)))
     (unless marked-rows
@@ -517,7 +532,7 @@ Inserts table at point with marked products."
     ;; Clear marks and update last_bought in shop file
     (let ((products (mapcar (lambda (row) (cdr (assoc "product" row)))
                             marked-rows)))
-      (org-shop--clear-marks-in-file shop-file products))
+      (org-shop--clear-marks-in-file shop-file products date))
     (message "Generated shopping list with %d items from %s"
              (length marked-rows) shop-name)))
 
@@ -543,6 +558,21 @@ Returns t if product was found and updated, nil otherwise."
             (org-shop--set-cell "price" new-price)
             (cl-return t)))))))
 
+(defun org-shop--update-notes-in-shop (shop-file product notes)
+  "Update PRODUCT's notes to NOTES in SHOP-FILE.
+Only updates if shop file has a 'notes' column.
+Returns t if product was found and updated, nil otherwise."
+  (with-current-buffer (find-file-noselect shop-file)
+    (save-excursion
+      (when (org-shop--goto-table-after-heading org-shop-source-heading)
+        ;; Only proceed if notes column exists
+        (when (org-shop--has-column-p "notes")
+          (dolist (line-num (org-shop--table-data-lines))
+            (org-table-goto-line line-num)
+            (when (string-equal-ignore-case (org-shop--get-cell "product") product)
+              (org-shop--set-cell "notes" notes)
+              (cl-return t))))))))
+
 (defun org-shop--product-exists-in-shop-p (shop-file product)
   "Check if PRODUCT exists in SHOP-FILE's regular table."
   (with-current-buffer (find-file-noselect shop-file)
@@ -553,38 +583,51 @@ Returns t if product was found and updated, nil otherwise."
                  when (string-equal-ignore-case (org-shop--get-cell "product") product)
                  return t)))))
 
-(defun org-shop--add-product-to-shop (shop-file product price)
-  "Add new PRODUCT with PRICE to SHOP-FILE's regular table.
-Inserts before any TOTAL row or at end of table data."
+(defun org-shop--add-product-to-shop (shop-file product price &optional notes date)
+  "Add new PRODUCT with PRICE and optional NOTES to SHOP-FILE's regular table.
+DATE is the purchase date; defaults to today.
+Inserts before any TOTAL row or at end of table data.
+Notes are only added if the shop file has a 'notes' column."
   (with-current-buffer (find-file-noselect shop-file)
     (save-excursion
       (when (org-shop--goto-table-after-heading org-shop-source-heading)
-        ;; Skip header
-        (forward-line 1)
-        (when (org-at-table-hline-p)
-          (forward-line 1))
-        ;; Find insertion point (before hline/TOTAL or end of data)
-        (let ((insert-point nil))
-          (while (and (org-at-table-p) (not (eobp)))
-            (let ((first-col (string-trim (or (org-table-get nil 1) ""))))
-              (if (or (org-at-table-hline-p)
-                      (string-match-p "^TOTAL$\\|^$" first-col))
-                  ;; Found hline or TOTAL/empty - insert before
-                  (progn
-                    (forward-line -1)
-                    (end-of-line)
-                    (setq insert-point (point))
-                    (goto-char (point-max))) ; exit loop
-                (setq insert-point (progn (end-of-line) (point)))
-                (forward-line 1))))
-          (when insert-point
-            (goto-char insert-point)
-            ;; Format: | next | product | price | quantity | last_bought |
-            (insert (format "\n| [ ] | %s | %s |  | %s |"
-                            product
-                            (or price "")
-                            (format-time-string "%Y-%m-%d")))
-            (org-table-align)))))))
+        ;; Check if notes column exists
+        (let ((has-notes-col (org-shop--has-column-p "notes")))
+          ;; Skip header
+          (forward-line 1)
+          (when (org-at-table-hline-p)
+            (forward-line 1))
+          ;; Find insertion point (before hline/TOTAL or end of data)
+          (let ((insert-point nil))
+            (while (and (org-at-table-p) (not (eobp)))
+              (let ((first-col (string-trim (or (org-table-get nil 1) ""))))
+                (if (or (org-at-table-hline-p)
+                        (string-match-p "^TOTAL$\\|^$" first-col))
+                    ;; Found hline or TOTAL/empty - insert before
+                    (progn
+                      (forward-line -1)
+                      (end-of-line)
+                      (setq insert-point (point))
+                      (goto-char (point-max))) ; exit loop
+                  (setq insert-point (progn (end-of-line) (point)))
+                  (forward-line 1))))
+            (when insert-point
+              (goto-char insert-point)
+              ;; Format depends on whether notes column exists
+              (let ((d (or date (format-time-string "%Y-%m-%d"))))
+                (if has-notes-col
+                    ;; Format: | next | product | price | quantity | notes | last_bought |
+                    (insert (format "\n| [ ] | %s | %s |  | %s | %s |"
+                                    product
+                                    (or price "")
+                                    (or notes "")
+                                    d))
+                  ;; Format: | next | product | price | quantity | last_bought |
+                  (insert (format "\n| [ ] | %s | %s |  | %s |"
+                                  product
+                                  (or price "")
+                                  d))))
+              (org-table-align))))))))
 
 (defun org-shop--ensure-history-table (shop-file)
   "Ensure purchase history table exists in SHOP-FILE.
@@ -632,12 +675,13 @@ Point must be at start of history table."
     (delete-region start (point)))
   (org-table-align))
 
-(defun org-shop--upsert-history (shop-file product count price)
+(defun org-shop--upsert-history (shop-file product count price &optional date)
   "Upsert purchase history entry for PRODUCT to SHOP-FILE.
-If entry for PRODUCT + today exists: update count/price.
+DATE is the purchase date; defaults to today.
+If entry for PRODUCT + date exists: update count/price.
 If count is 0 or empty: remove entry.
 Otherwise: insert new row."
-  (let ((date (format-time-string "%Y-%m-%d"))
+  (let ((date (or date (format-time-string "%Y-%m-%d")))
         (count-num (if (and count (not (string-empty-p count)))
                        (string-to-number count)
                      1)))
@@ -800,7 +844,8 @@ Re-syncing is safe - updates existing entries instead of creating duplicates."
   (interactive)
   (unless (org-shop--at-table-p)
     (user-error "Not in an org table"))
-  (let* ((shop-name (org-shop--resolve-shop))
+  (let* ((date (org-shop--page-date))
+         (shop-name (org-shop--resolve-shop))
          (shop-file (org-shop--find-shop-file shop-name))
          (rows (org-shop--parse-shopping-table))
          (logged 0)
@@ -812,7 +857,8 @@ Re-syncing is safe - updates existing entries instead of creating duplicates."
             (product (cdr (assoc "product" row)))
             (count (cdr (assoc "count" row)))
             (known-price (cdr (assoc "known_price" row)))
-            (new-price (cdr (assoc "new_price" row))))
+            (new-price (cdr (assoc "new_price" row)))
+            (notes (cdr (assoc "notes" row))))
         ;; Skip Summary row
         (unless (string= product "Summary")
           ;; Determine effective price
@@ -821,23 +867,25 @@ Re-syncing is safe - updates existing entries instead of creating duplicates."
                          known-price)))
             ;; Check if product exists in shop, add if new
             (unless (org-shop--product-exists-in-shop-p shop-file product)
-              (org-shop--add-product-to-shop shop-file product price)
+              (org-shop--add-product-to-shop shop-file product price notes date)
               (cl-incf products-added))
             ;; Upsert to history based on done status
             (if (and done (string-match-p "X" done))
                 ;; Done: upsert with count (or 1 if empty)
                 (progn
-                  (org-shop--upsert-history shop-file product count price)
+                  (org-shop--upsert-history shop-file product count price date)
                   (cl-incf logged))
               ;; Not done: upsert with count=0 to remove from history
-              (org-shop--upsert-history shop-file product "0" price)
+              (org-shop--upsert-history shop-file product "0" price date)
               (cl-incf removed)))
-          ;; Update price in shop file if new_price differs
-          (when (and new-price
-                     (not (string-empty-p new-price))
-                     (not (string-equal new-price known-price)))
-            (org-shop--update-price-in-shop shop-file product new-price)
-            (cl-incf price-updated)))))
+          ;; Update price in shop file if we have an effective price
+          ;; (updates even when new_price == known_price, since shop file might be empty)
+          (when (and price (not (string-empty-p price)))
+            (org-shop--update-price-in-shop shop-file product price)
+            (cl-incf price-updated))
+          ;; Update notes in shop file if we have notes
+          (when (and notes (not (string-empty-p notes)))
+            (org-shop--update-notes-in-shop shop-file product notes)))))
     ;; Save shop file
     (with-current-buffer (find-file-noselect shop-file)
       (save-buffer))
