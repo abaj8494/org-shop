@@ -889,18 +889,18 @@ Re-syncing is safe - updates existing entries instead of creating duplicates."
                   (cl-incf logged))
               ;; Not done: upsert with count=0 to remove from history
               (org-shop--upsert-history shop-file product "0" price date)
-              (cl-incf removed)))
-          ;; Update price in shop file if we have an effective price
-          ;; (updates even when new_price == known_price, since shop file might be empty)
-          (when (and price (not (string-empty-p price)))
-            (org-shop--update-price-in-shop shop-file product price)
-            (cl-incf price-updated))
-          ;; Update quantity in shop file if we have quantity
-          (when (and quantity (not (string-empty-p quantity)))
-            (org-shop--update-quantity-in-shop shop-file product quantity))
-          ;; Update notes in shop file if we have notes
-          (when (and notes (not (string-empty-p notes)))
-            (org-shop--update-notes-in-shop shop-file product notes)))))
+              (cl-incf removed))
+            ;; Update price in shop file if we have an effective price
+            ;; (updates even when new_price == known_price, since shop file might be empty)
+            (when (and price (not (string-empty-p price)))
+              (org-shop--update-price-in-shop shop-file product price)
+              (cl-incf price-updated))
+            ;; Update quantity in shop file if we have quantity
+            (when (and quantity (not (string-empty-p quantity)))
+              (org-shop--update-quantity-in-shop shop-file product quantity))
+            ;; Update notes in shop file if we have notes
+            (when (and notes (not (string-empty-p notes)))
+              (org-shop--update-notes-in-shop shop-file product notes))))))
     ;; Save shop file
     (with-current-buffer (find-file-noselect shop-file)
       (save-buffer))
