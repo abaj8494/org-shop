@@ -408,7 +408,7 @@ Includes summary row with aggregation formulas."
                         (or quantity "")
                         (or notes "")
                         (if (and price (not (string-empty-p price)))
-                            price
+                            (format "%.2f" (string-to-number price))
                           "-")))))
     ;; Insert separator before summary
     (insert "|------+------+-------+----------+----------+-------+-------------+-----------|\n")
@@ -913,75 +913,84 @@ Re-syncing is safe - updates existing entries instead of creating duplicates."
 ;;; Keymap Setup
 ;;; ============================================================================
 
+(defun org-shop--parse-price (str)
+  "Parse STR as a price value. Returns 0.0 for empty, \"-\", or non-numeric."
+  (if (or (null str) (string-empty-p str) (string= str "-"))
+      0.0
+    (let ((n (string-to-number str)))
+      (if (zerop n) 0.0 (float n)))))
+
 (defun org-shop-recalculate ()
   "Recalculate the summary row in current shopping list table.
-Updates: done count, total count, discount, total price (count * effective_price).
-Effective price = new_price if set, otherwise known_price."
+Summary known_price = total paid (effective_price * count - discounts).
+Summary new_price = price diff (sum of (new - known) * count).
+Formats all price cells to 2 decimal places."
   (interactive)
   (unless (org-at-table-p)
     (user-error "Not in an org table"))
   (save-excursion
-    ;; Start from line 2 to skip header
-    (org-table-goto-line 2)
     (let ((marked 0) (unmarked 0)
           (total-count 0)
           (total-discount 0.0)
-          (total-price 0.0)
+          (total-paid 0.0)
           (total-diff 0.0)
-          (summary-line nil))
-      ;; Iterate through table rows
-      (while (and (org-at-table-p) (not (eobp)))
-        (unless (org-at-table-hline-p)
-          (let ((product (string-trim (or (org-table-get nil 1) ""))))
-            (if (string= product "Summary")
-                (setq summary-line (org-table-current-line))
-              ;; Data row - collect stats (only rows with checkbox format)
-              (let ((done (string-trim (or (org-table-get nil 2) "")))
-                    (count-str (string-trim (or (org-table-get nil 3) "")))
-                    (disc-str (string-trim (or (org-table-get nil 4) "")))
-                    (known-str (string-trim (or (org-table-get nil 6) "")))
-                    (new-str (string-trim (or (org-table-get nil 7) ""))))
-                ;; Only process rows with checkbox format [ ] or [X]
-                (when (string-match-p "\\[.\\]" done)
-                  ;; Count marked/unmarked
-                  (if (string-match-p "X" done)
-                      (cl-incf marked)
-                    (cl-incf unmarked))
-                  ;; Get count (default 1 if empty)
-                  (let ((count (if (string-empty-p count-str) 1
-                                 (string-to-number count-str))))
-                    ;; Sum counts
-                    (setq total-count (+ total-count count))
-                    ;; Calculate effective price (new_price overrides known_price)
-                    (let ((effective-price (cond
-                                            ((not (string-empty-p new-str))
-                                             (string-to-number new-str))
-                                            ((not (string-empty-p known-str))
-                                             (string-to-number known-str))
-                                            (t 0))))
-                      ;; Sum price * count
-                      (setq total-price (+ total-price (* count effective-price)))
-                      ;; Calculate discount (rate * effective_price * count)
-                      (when (not (string-empty-p disc-str))
-                        (setq total-discount (+ total-discount
-                                                (* (string-to-number disc-str)
-                                                   effective-price
-                                                   count))))
-                      ;; Calculate diff (new - known) * count
-                      (when (not (string-empty-p new-str))
-                        (let ((known (if (string-empty-p known-str) 0
-                                       (string-to-number known-str)))
-                              (new (string-to-number new-str)))
-                          (setq total-diff (+ total-diff (* count (- new known)))))))))))))
-        (forward-line 1))
+          (summary-line nil)
+          (data-lines (org-shop--table-data-lines)))
+      ;; Pass 1: format price cells and collect stats
+      (dolist (line-num data-lines)
+        (org-table-goto-line line-num)
+        (let ((product (or (org-shop--get-cell "product") ""))
+              (done (or (org-shop--get-cell "done") ""))
+              (count-str (or (org-shop--get-cell "count") ""))
+              (disc-str (or (org-shop--get-cell "discount") ""))
+              (known-str (or (org-shop--get-cell "known_price") ""))
+              (new-str (or (org-shop--get-cell "new_price") "")))
+          (if (string= product "Summary")
+              (setq summary-line line-num)
+            ;; Format price cells to .2f (skip "-" and empty)
+            (let ((known-val (org-shop--parse-price known-str))
+                  (new-val (org-shop--parse-price new-str)))
+              (when (and (not (string-empty-p known-str))
+                         (not (string= known-str "-"))
+                         (not (zerop known-val)))
+                (org-shop--set-cell "known_price" (format "%.2f" known-val)))
+              (when (and (not (string-empty-p new-str))
+                         (not (zerop new-val)))
+                (org-shop--set-cell "new_price" (format "%.2f" new-val)))
+              ;; Collect stats from data rows with checkboxes
+              (when (string-match-p "\\[.\\]" done)
+                (if (string-match-p "X" done)
+                    (cl-incf marked)
+                  (cl-incf unmarked))
+                (let* ((count (if (string-empty-p count-str) 1
+                                (string-to-number count-str)))
+                       (effective-price (if (not (zerop new-val)) new-val known-val))
+                       (disc-rate (if (string-empty-p disc-str) 0.0
+                                    (string-to-number disc-str))))
+                  (setq total-count (+ total-count count))
+                  ;; new_price = receipt price (discount already factored in)
+                  ;; known_price items: apply discount rate
+                  (let* ((has-new (not (zerop new-val)))
+                         (item-cost (if has-new
+                                        (* count new-val)
+                                      (* count known-val (- 1.0 disc-rate))))
+                         (item-saved (if has-new 0.0
+                                       (* count known-val disc-rate))))
+                    (setq total-paid (+ total-paid item-cost))
+                    ;; Dollars saved from discounts
+                    (setq total-discount (+ total-discount item-saved))
+                    ;; price_diff = Σ ((new - known) × count) for items with new_price
+                    (when has-new
+                      (setq total-diff (+ total-diff
+                                          (* count (- new-val known-val))))))))))))
       ;; Update summary row
       (when summary-line
         (org-table-goto-line summary-line)
-        (org-table-put nil 2 (format "%dU %dM" unmarked marked))
-        (org-table-put nil 3 (if (zerop total-count) "" (number-to-string total-count)))
-        (org-table-put nil 4 (if (zerop total-discount) "" (format "%.2f" total-discount)))
-        (org-table-put nil 6 (format "%.2f" total-price))
-        (org-table-put nil 7 (format "%s%.2f" (if (>= total-diff 0) "+" "") total-diff))
+        (org-shop--set-cell "done" (format "%dU %dM" unmarked marked))
+        (org-shop--set-cell "count" (if (zerop total-count) "" (number-to-string total-count)))
+        (org-shop--set-cell "discount" (if (zerop total-discount) "" (format "%.2f" total-discount)))
+        (org-shop--set-cell "known_price" (format "%.2f" total-paid))
+        (org-shop--set-cell "new_price" (format "%s%.2f" (if (>= total-diff 0) "+" "") total-diff))
         (org-table-align)))))
 
 (defvar org-shop-command-map
