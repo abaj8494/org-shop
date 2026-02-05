@@ -393,28 +393,30 @@ Includes summary row with aggregation formulas."
         (when (and price (not (string-empty-p price)))
           (setq total-known (+ total-known (string-to-number price))))))
     ;; Insert top hline
-    (insert "|---------+------+-------+----------+-------+-------------+-----------|\n")
-    ;; Insert header (new order: product first)
-    (insert "| product | done | count | discount | notes | known_price | new_price |\n")
-    (insert "|---------+------+-------+----------+-------+-------------+-----------|\n")
+    (insert "|------+------+-------+----------+----------+-------+-------------+-----------|\n")
+    ;; Insert header
+    (insert "| product | done | count | discount | quantity | notes | known_price | new_price |\n")
+    (insert "|------+------+-------+----------+----------+-------+-------------+-----------|\n")
     ;; Insert data rows
     (dolist (row rows)
       (let ((product (cdr (assoc "product" row)))
             (price (cdr (assoc "price" row)))
+            (quantity (cdr (assoc "quantity" row)))
             (notes (cdr (assoc "notes" row))))
-        (insert (format "| %s | [ ] |  |  | %s | %s |  |\n"
+        (insert (format "| %s | [ ] |  |  | %s | %s | %s |  |\n"
                         (or product "")
+                        (or quantity "")
                         (or notes "")
                         (if (and price (not (string-empty-p price)))
                             price
                           "-")))))
     ;; Insert separator before summary
-    (insert "|---------+------+-------+----------+-------+-------------+-----------|\n")
+    (insert "|------+------+-------+----------+----------+-------+-------------+-----------|\n")
     ;; Insert summary row with initial values
-    (insert (format "| Summary | %dU 0M |  |  | - | %.2f | +0.00 |\n"
+    (insert (format "| Summary | %dU 0M |  |  |  | - | %.2f | +0.00 |\n"
                     num-items total-known))
     ;; Insert bottom hline
-    (insert "|---------+------+-------+----------+-------+-------------+-----------|\n")
+    (insert "|------+------+-------+----------+----------+-------+-------------+-----------|\n")
     ;; Align table
     (org-table-align)))
 
@@ -570,6 +572,17 @@ Returns t if product was found and updated, nil otherwise."
                    do (org-table-goto-line line-num)
                    when (string-equal-ignore-case (org-shop--get-cell "product") product)
                    return (progn (org-shop--set-cell "notes" notes) t)))))))
+
+(defun org-shop--update-quantity-in-shop (shop-file product quantity)
+  "Update PRODUCT's quantity to QUANTITY in SHOP-FILE.
+Returns t if product was found and updated, nil otherwise."
+  (with-current-buffer (find-file-noselect shop-file)
+    (save-excursion
+      (when (org-shop--goto-table-after-heading org-shop-source-heading)
+        (cl-loop for line-num in (org-shop--table-data-lines)
+                 do (org-table-goto-line line-num)
+                 when (string-equal-ignore-case (org-shop--get-cell "product") product)
+                 return (progn (org-shop--set-cell "quantity" quantity) t))))))
 
 (defun org-shop--product-exists-in-shop-p (shop-file product)
   "Check if PRODUCT exists in SHOP-FILE's regular table."
@@ -854,6 +867,7 @@ Re-syncing is safe - updates existing entries instead of creating duplicates."
       (let ((done (cdr (assoc "done" row)))
             (product (cdr (assoc "product" row)))
             (count (cdr (assoc "count" row)))
+            (quantity (cdr (assoc "quantity" row)))
             (known-price (cdr (assoc "known_price" row)))
             (new-price (cdr (assoc "new_price" row)))
             (notes (cdr (assoc "notes" row))))
@@ -881,6 +895,9 @@ Re-syncing is safe - updates existing entries instead of creating duplicates."
           (when (and price (not (string-empty-p price)))
             (org-shop--update-price-in-shop shop-file product price)
             (cl-incf price-updated))
+          ;; Update quantity in shop file if we have quantity
+          (when (and quantity (not (string-empty-p quantity)))
+            (org-shop--update-quantity-in-shop shop-file product quantity))
           ;; Update notes in shop file if we have notes
           (when (and notes (not (string-empty-p notes)))
             (org-shop--update-notes-in-shop shop-file product notes)))))
