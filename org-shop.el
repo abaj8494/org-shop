@@ -552,11 +552,10 @@ Returns t if product was found and updated, nil otherwise."
   (with-current-buffer (find-file-noselect shop-file)
     (save-excursion
       (when (org-shop--goto-table-after-heading org-shop-source-heading)
-        (dolist (line-num (org-shop--table-data-lines))
-          (org-table-goto-line line-num)
-          (when (string-equal-ignore-case (org-shop--get-cell "product") product)
-            (org-shop--set-cell "price" new-price)
-            (cl-return t)))))))
+        (cl-loop for line-num in (org-shop--table-data-lines)
+                 do (org-table-goto-line line-num)
+                 when (string-equal-ignore-case (org-shop--get-cell "product") product)
+                 return (progn (org-shop--set-cell "price" new-price) t))))))
 
 (defun org-shop--update-notes-in-shop (shop-file product notes)
   "Update PRODUCT's notes to NOTES in SHOP-FILE.
@@ -567,11 +566,10 @@ Returns t if product was found and updated, nil otherwise."
       (when (org-shop--goto-table-after-heading org-shop-source-heading)
         ;; Only proceed if notes column exists
         (when (org-shop--has-column-p "notes")
-          (dolist (line-num (org-shop--table-data-lines))
-            (org-table-goto-line line-num)
-            (when (string-equal-ignore-case (org-shop--get-cell "product") product)
-              (org-shop--set-cell "notes" notes)
-              (cl-return t))))))))
+          (cl-loop for line-num in (org-shop--table-data-lines)
+                   do (org-table-goto-line line-num)
+                   when (string-equal-ignore-case (org-shop--get-cell "product") product)
+                   return (progn (org-shop--set-cell "notes" notes) t)))))))
 
 (defun org-shop--product-exists-in-shop-p (shop-file product)
   "Check if PRODUCT exists in SHOP-FILE's regular table."
