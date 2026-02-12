@@ -285,6 +285,30 @@ Returns point at start of table, or nil if not found."
   (let ((columns (org-shop--get-table-columns)))
     (cl-find column-name columns :test #'string-equal-ignore-case)))
 
+(defun org-shop--ensure-column (column-name &optional after-column)
+  "Ensure COLUMN-NAME exists in current table.
+If AFTER-COLUMN is specified, inserts after that column.
+Otherwise inserts at the end.
+Returns t if column was created, nil if it already existed."
+  (if (org-shop--has-column-p column-name)
+      nil
+    (save-excursion
+      (let* ((columns (org-shop--get-table-columns))
+             (insert-idx (if after-column
+                             (1+ (or (cl-position after-column columns
+                                                  :test #'string-equal-ignore-case)
+                                     (1- (length columns))))
+                           (length columns))))
+        ;; Go to header row and the target column position
+        (org-table-goto-line 1)
+        (org-table-goto-column (1+ insert-idx))
+        ;; Insert a new column (inserts to the left of current)
+        (org-table-insert-column)
+        ;; Set the header cell
+        (org-table-put nil (1+ insert-idx) column-name)
+        (org-table-align)
+        t))))
+
 (defun org-shop--is-marked-p (&optional column)
   "Return non-nil if current row is marked in COLUMN (default \"next\")."
   (let ((val (org-shop--get-cell (or column "next"))))
@@ -561,17 +585,17 @@ Returns t if product was found and updated, nil otherwise."
 
 (defun org-shop--update-notes-in-shop (shop-file product notes)
   "Update PRODUCT's notes to NOTES in SHOP-FILE.
-Only updates if shop file has a 'notes' column.
+Creates notes column if it doesn't exist (after quantity column).
 Returns t if product was found and updated, nil otherwise."
   (with-current-buffer (find-file-noselect shop-file)
     (save-excursion
       (when (org-shop--goto-table-after-heading org-shop-source-heading)
-        ;; Only proceed if notes column exists
-        (when (org-shop--has-column-p "notes")
-          (cl-loop for line-num in (org-shop--table-data-lines)
-                   do (org-table-goto-line line-num)
-                   when (string-equal-ignore-case (org-shop--get-cell "product") product)
-                   return (progn (org-shop--set-cell "notes" notes) t)))))))
+        ;; Ensure notes column exists (insert after quantity if needed)
+        (org-shop--ensure-column "notes" "quantity")
+        (cl-loop for line-num in (org-shop--table-data-lines)
+                 do (org-table-goto-line line-num)
+                 when (string-equal-ignore-case (org-shop--get-cell "product") product)
+                 return (progn (org-shop--set-cell "notes" notes) t))))))
 
 (defun org-shop--update-quantity-in-shop (shop-file product quantity)
   "Update PRODUCT's quantity to QUANTITY in SHOP-FILE.
@@ -598,11 +622,14 @@ Returns t if product was found and updated, nil otherwise."
   "Add new PRODUCT with PRICE and optional NOTES to SHOP-FILE's regular table.
 DATE is the purchase date; defaults to today.
 Inserts before any TOTAL row or at end of table data.
-Notes are only added if the shop file has a 'notes' column."
+Creates notes column if needed when notes are provided."
   (with-current-buffer (find-file-noselect shop-file)
     (save-excursion
       (when (org-shop--goto-table-after-heading org-shop-source-heading)
-        ;; Check if notes column exists
+        ;; Ensure notes column exists if we have notes to add
+        (when (and notes (not (string-empty-p notes)))
+          (org-shop--ensure-column "notes" "quantity"))
+        ;; Check if notes column exists (may have just been created)
         (let ((has-notes-col (org-shop--has-column-p "notes")))
           ;; Skip header
           (forward-line 1)
@@ -685,6 +712,71 @@ Point must be at start of history table."
     (forward-line 1)
     (delete-region start (point)))
   (org-table-align))
+
+(defun org-shop--reorganize-history-table ()
+  "Reorganize history table: sort by date descending with dividers between date groups.
+Point must be within the history table."
+  (when (org-at-table-p)
+    (let ((rows '())
+          (total-row nil)
+          (table-start nil)
+          (table-end nil))
+      ;; Find table boundaries and collect all data rows
+      (org-table-goto-line 1)
+      (setq table-start (point))
+      ;; Skip header row
+      (forward-line 1)
+      ;; Skip header hline if present
+      (when (org-at-table-hline-p)
+        (forward-line 1))
+      ;; Collect all data rows (skip hlines)
+      (while (and (org-at-table-p) (not (eobp)))
+        (if (org-at-table-hline-p)
+            (forward-line 1)
+          (let ((product (string-trim (or (org-table-get nil 1) "")))
+                (date (string-trim (or (org-table-get nil 2) "")))
+                (count-str (string-trim (or (org-table-get nil 3) "")))
+                (price-str (string-trim (or (org-table-get nil 4) ""))))
+            (if (string= product "TOTAL")
+                (setq total-row (list product date count-str price-str))
+              ;; Only collect rows with valid date format
+              (when (string-match-p "^[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}$" date)
+                (push (list product date count-str price-str) rows))))
+          (forward-line 1)))
+      (setq table-end (point))
+      ;; Sort rows by date descending
+      (setq rows (sort rows (lambda (a b)
+                              (string> (nth 1 a) (nth 1 b)))))
+      ;; Delete old table content (keep header)
+      (goto-char table-start)
+      (forward-line 1) ; skip header
+      (when (org-at-table-hline-p)
+        (forward-line 1)) ; skip header hline
+      (let ((data-start (point)))
+        (delete-region data-start table-end))
+      ;; Insert sorted rows with date dividers
+      (let ((prev-date nil))
+        (dolist (row rows)
+          (let ((product (nth 0 row))
+                (date (nth 1 row))
+                (count-str (nth 2 row))
+                (price-str (nth 3 row)))
+            ;; Add hline between different dates
+            (when (and prev-date (not (string= prev-date date)))
+              (insert "|--------------------+------------+--------+--------|\n"))
+            (insert (format "| %s | %s | %s | %s |\n"
+                            product date count-str price-str))
+            (setq prev-date date))))
+      ;; Add TOTAL row with dividers if we have data
+      (when (and rows total-row)
+        (insert "|--------------------+------------+--------+--------|\n")
+        (insert (format "| %s | %s | %s | %s |\n"
+                        (nth 0 total-row) (nth 1 total-row)
+                        (nth 2 total-row) (nth 3 total-row)))
+        (insert "|--------------------+------------+--------+--------|\n"))
+      ;; Align the table
+      (org-table-goto-line 1)
+      (org-table-align))))
 
 (defun org-shop--upsert-history (shop-file product count price &optional date)
   "Upsert purchase history entry for PRODUCT to SHOP-FILE.
@@ -771,6 +863,8 @@ Otherwise: insert new row."
                       (org-table-align)))))
                ;; No entry and count = 0: do nothing
                (t nil)))
+            ;; Reorganize table (sort by date descending, add dividers)
+            (org-shop--reorganize-history-table)
             ;; Recalculate TOTAL row
             (org-shop--recalculate-history-total)))))))
 
