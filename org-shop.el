@@ -117,8 +117,16 @@ If nil, seasonal produce table will not be generated."
   :group 'org-shop)
 
 (defcustom org-shop-seasonal-heading "seasonal fruit + veg"
-  "Heading name for seasonal produce subheading."
+  "Heading name for seasonal produce subheading.
+The word 'seasonal' will be wrapped in an ID link if seasons file has an ID."
   :type 'string
+  :group 'org-shop)
+
+(defcustom org-shop-seasonal-required-tag "grocery"
+  "Filetag required in shop file for seasonal produce table to appear.
+If nil, seasonal table appears for all shops."
+  :type '(choice (const :tag "No restriction" nil)
+                 (string :tag "Required filetag"))
   :group 'org-shop)
 
 ;;; ============================================================================
@@ -414,6 +422,26 @@ Returns one of: \"Summer\", \"Autumn\", \"Winter\", \"Spring\"."
      ((member month '(6 7 8)) "Winter")
      ((member month '(9 10 11)) "Spring"))))
 
+(defun org-shop--shop-has-filetag-p (shop-file tag)
+  "Return non-nil if SHOP-FILE has TAG in its filetags."
+  (when (and shop-file tag)
+    (with-current-buffer (find-file-noselect shop-file)
+      (save-excursion
+        (goto-char (point-min))
+        (when (re-search-forward "^#\\+filetags:.*" nil t)
+          (let ((filetags-line (match-string 0)))
+            (string-match-p (concat ":" (regexp-quote tag) ":") filetags-line)))))))
+
+(defun org-shop--get-seasons-file-id ()
+  "Get the org ID from `org-shop-seasons-file', or nil if none."
+  (when (and org-shop-seasons-file
+             (file-exists-p org-shop-seasons-file))
+    (with-current-buffer (find-file-noselect org-shop-seasons-file)
+      (save-excursion
+        (goto-char (point-min))
+        (when (re-search-forward "^:ID:\\s-*\\(.+\\)$" nil t)
+          (string-trim (match-string 1)))))))
+
 (defun org-shop--parse-seasons-file ()
   "Parse `org-shop-seasons-file' and return alist of seasons to produce.
 Returns ((\"Summer\" . ((\"Fruit\" . (items...)) (\"Vegetables\" . (items...))))
@@ -458,19 +486,17 @@ Returns ((\"Summer\" . ((\"Fruit\" . (items...)) (\"Vegetables\" . (items...))))
           (forward-line 1))
         (nreverse seasons)))))
 
-(defun org-shop--get-seasonal-produce (date-string)
-  "Get seasonal produce for DATE-STRING.
-Returns (FRUITS . VEGETABLES) where each is a list of item names.
-Includes Year-Round items."
+(defun org-shop--get-seasonal-produce-separate (date-string)
+  "Get seasonal produce for DATE-STRING, separating year-round from seasonal.
+Returns plist (:year-round-fruits :year-round-veg :seasonal-fruits :seasonal-veg)."
   (let* ((season (org-shop--season-from-date date-string))
          (all-seasons (org-shop--parse-seasons-file))
          (season-data (cdr (assoc season all-seasons)))
-         (year-round-data (cdr (assoc "Year-Round" all-seasons)))
-         (fruits (append (cdr (assoc "Fruit" year-round-data))
-                         (cdr (assoc "Fruit" season-data))))
-         (vegetables (append (cdr (assoc "Vegetables" year-round-data))
-                             (cdr (assoc "Vegetables" season-data)))))
-    (cons fruits vegetables)))
+         (year-round-data (cdr (assoc "Year-Round" all-seasons))))
+    (list :year-round-fruits (cdr (assoc "Fruit" year-round-data))
+          :year-round-veg (cdr (assoc "Vegetables" year-round-data))
+          :seasonal-fruits (cdr (assoc "Fruit" season-data))
+          :seasonal-veg (cdr (assoc "Vegetables" season-data)))))
 
 (defun org-shop--current-heading-level ()
   "Return the level of the current org heading, or 0 if not under a heading."
@@ -481,35 +507,66 @@ Includes Year-Round items."
           (org-current-level))
       (error 0))))
 
-(defun org-shop--insert-seasonal-table (date-string)
+(defun org-shop--insert-seasonal-table (date-string shop-file)
   "Insert seasonal produce subheading and table for DATE-STRING.
+Only inserts if SHOP-FILE has the required filetag (if configured).
 Inserts at point with heading level one deeper than current heading."
   (when org-shop-seasons-file
-    (let* ((produce (org-shop--get-seasonal-produce date-string))
-           (fruits (car produce))
-           (vegetables (cdr produce))
-           (current-level (org-shop--current-heading-level))
-           (sub-level (1+ current-level))
-           (stars (make-string sub-level ?*)))
-      (when (or fruits vegetables)
-        ;; Insert blank line and subheading
-        (insert "\n\n" stars " " org-shop-seasonal-heading "\n\n")
-        ;; Insert table header
-        (insert "|------+-----------+------+-----------|\n")
-        (insert "| done | fruit     | done | vegetable |\n")
-        (insert "|------+-----------+------+-----------|\n")
-        ;; Insert rows - pair fruits and vegetables
-        (let ((max-rows (max (length fruits) (length vegetables))))
-          (dotimes (i max-rows)
-            (let ((fruit (or (nth i fruits) ""))
-                  (veg (or (nth i vegetables) "")))
-              (insert (format "| [ ]  | %s | [ ]  | %s |\n" fruit veg)))))
-        ;; Insert bottom hline
-        (insert "|------+-----------+------+-----------|\n")
-        ;; Align table
-        (save-excursion
-          (forward-line -1)
-          (org-table-align))))))
+    ;; Check filetag requirement
+    (when (or (null org-shop-seasonal-required-tag)
+              (org-shop--shop-has-filetag-p shop-file org-shop-seasonal-required-tag))
+      (let* ((season (org-shop--season-from-date date-string))
+             (season-tag (downcase season))
+             (seasons-id (org-shop--get-seasons-file-id))
+             (produce (org-shop--get-seasonal-produce-separate date-string))
+             (yr-fruits (plist-get produce :year-round-fruits))
+             (yr-veg (plist-get produce :year-round-veg))
+             (s-fruits (plist-get produce :seasonal-fruits))
+             (s-veg (plist-get produce :seasonal-veg))
+             (all-fruits (append yr-fruits s-fruits))
+             (all-veg (append yr-veg s-veg))
+             (current-level (org-shop--current-heading-level))
+             (sub-level (1+ current-level))
+             (stars (make-string sub-level ?*))
+             ;; Build heading with optional ID link
+             (seasonal-word (if seasons-id
+                                (format "[[id:%s][seasonal]]" seasons-id)
+                              "seasonal"))
+             (heading-text (replace-regexp-in-string
+                            "seasonal" seasonal-word
+                            org-shop-seasonal-heading t t)))
+        (when (or all-fruits all-veg)
+          ;; Insert blank line and subheading with season tag
+          (insert (format "\n\n%s %s %s:%s:\n\n"
+                          stars heading-text
+                          (make-string (max 0 (- 70 (length heading-text) sub-level 3)) ? )
+                          season-tag))
+          ;; Insert table header
+          (insert "|------+--------------+------+--------------|\n")
+          (insert "| done | fruit        | done | vegetable    |\n")
+          (insert "|------+--------------+------+--------------|\n")
+          ;; Insert year-round rows first
+          (let ((yr-max (max (length yr-fruits) (length yr-veg))))
+            (dotimes (i yr-max)
+              (let ((fruit (or (nth i yr-fruits) ""))
+                    (veg (or (nth i yr-veg) "")))
+                (insert (format "| [ ]  | %s | [ ]  | %s |\n" fruit veg)))))
+          ;; Insert hline separator between year-round and seasonal
+          (when (and (or yr-fruits yr-veg)
+                     (or s-fruits s-veg))
+            (insert "|------+--------------+------+--------------|\n"))
+          ;; Insert seasonal rows
+          (let ((s-max (max (length s-fruits) (length s-veg))))
+            (dotimes (i s-max)
+              (let ((fruit (or (nth i s-fruits) ""))
+                    (veg (or (nth i s-veg) "")))
+                (insert (format "| [ ]  | %s | [ ]  | %s |\n" fruit veg)))))
+          ;; Insert bottom hline
+          (insert "|------+--------------+------+--------------|\n")
+          ;; Align table
+          (save-excursion
+            (forward-line -1)
+            (org-table-align)))))))
 
 ;;; ============================================================================
 ;;; Core Functions - Generate Shopping List
@@ -700,7 +757,7 @@ If `org-shop-seasons-file' is set, also inserts seasonal produce subheading."
     (org-shop--insert-shopping-table marked-rows)
     ;; Insert seasonal produce subheading if configured
     (when org-shop-seasons-file
-      (org-shop--insert-seasonal-table date))
+      (org-shop--insert-seasonal-table date shop-file))
     ;; Clear marks and update last_bought in shop file
     (let ((products (mapcar (lambda (row) (cdr (assoc "product" row)))
                             marked-rows)))

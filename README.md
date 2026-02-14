@@ -96,26 +96,35 @@ History tables are sorted by date descending with dividers between shopping trip
 <details>
 <summary><strong>Seasonal Produce</strong></summary>
 
-If `org-shop-seasons-file` points to a seasons file, `C-c S g` also inserts a seasonal produce checklist below the shopping table:
+If `org-shop-seasons-file` points to a seasons file, `C-c S g` inserts a seasonal produce checklist. Only appears for shops with the `grocery` filetag.
 
 ```org
-**** seasonal fruit + veg
+**** [[id:57B44173-...][seasonal]] fruit + veg                          :summer:
 
-|------+------------+------+-------------|
-| done | fruit      | done | vegetable   |
-|------+------------+------+-------------|
-| [ ]  | Banana     | [ ]  | Carrot      |
-| [ ]  | Apricot    | [ ]  | Beans       |
-| [ ]  | Cherry     | [ ]  | Capsicum    |
-| [ ]  | Mango      | [ ]  | Corn        |
-|------+------------+------+-------------|
+|------+--------------+------+--------------|
+| done | fruit        | done | vegetable    |
+|------+--------------+------+--------------|
+| [ ]  | Banana       | [ ]  | Carrot       |
+| [ ]  | Lemon        | [ ]  | Onion        |
+|------+--------------+------+--------------|
+| [ ]  | Apricot      | [ ]  | Beans        |
+| [ ]  | Cherry       | [ ]  | Capsicum     |
+| [ ]  | Mango        | [ ]  | Corn         |
+|------+--------------+------+--------------|
 ```
 
-The season is determined from the filename (`2026-02-12.org` -> February -> Summer in Australia).
+- Season tag (`:summer:`, `:winter:`, etc.) from file date
+- ID link to seasons.org in heading
+- Horizontal separator between year-round and seasonal items
 
 **seasons.org structure:**
 
 ```org
+:PROPERTIES:
+:ID: 57B44173-8479-4B84-BFE8-828A91901701
+:END:
+#+filetags: :shopping:grocery:
+
 * Year-Round
 ** Fruit
 *** Banana
@@ -125,11 +134,13 @@ The season is determined from the filename (`2026-02-12.org` -> February -> Summ
 * Summer (Dec-Feb)
 ** Fruit
 *** Mango
-*** Peach
 ** Vegetables
 *** Tomato
-*** Corn
 ```
+
+**Shop file requirement:**
+
+Add `#+filetags: :grocery:` to shop files that sell produce. Shops without this tag (e.g. `bunnings.org`) won't show seasonal tables.
 
 </details>
 
@@ -158,6 +169,7 @@ The season is determined from the filename (`2026-02-12.org` -> February -> Summ
 | `org-shop-clear-marks-after-generate` | `t` | Clear marks in shop file after generate |
 | `org-shop-seasons-file` | `nil` | Path to seasons.org (nil=disabled) |
 | `org-shop-seasonal-heading` | `"seasonal fruit + veg"` | Subheading name for seasonal table |
+| `org-shop-seasonal-required-tag` | `"grocery"` | Filetag required for seasonal table (nil=all shops) |
 | `org-shop-keymap-prefix` | `"C-c S"` | Prefix for keybindings |
 
 </details>
