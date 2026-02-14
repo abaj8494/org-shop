@@ -17,6 +17,7 @@
 ;; - Generate shopping lists in daily/destination files
 ;; - Track price changes and maintain price history
 ;; - Sync prices back to source shop files
+;; - Seasonal produce integration (optional)
 ;;
 ;; Usage:
 ;;   (require 'org-shop)
@@ -27,6 +28,24 @@
 ;;   C-c S g - Generate shopping list from marked items
 ;;   C-c S s - Sync prices back to shop file
 ;;   C-c S c - Clear all marks in current shop file
+;;
+;; Seasonal Produce:
+;;   To enable seasonal produce suggestions, set `org-shop-seasons-file':
+;;     (setq org-shop-seasons-file "~/path/to/seasons.org")
+;;
+;;   The seasons.org file should have this structure:
+;;     * Summer (Dec-Feb)
+;;     ** Fruit
+;;     *** Mango
+;;     *** Peach
+;;     ** Vegetables
+;;     *** Tomato
+;;     *** Corn
+;;     * Autumn (Mar-May)
+;;     ...
+;;
+;;   When C-c S g is invoked, a seasonal subheading will be inserted
+;;   below the shopping table with in-season fruits and vegetables.
 
 ;;; Code:
 
@@ -87,6 +106,18 @@ If nil, prompt user to select shop."
 (defcustom org-shop-keymap-prefix "C-c S"
   "Prefix key for org-shop commands.
 Change this if the default conflicts with other bindings."
+  :type 'string
+  :group 'org-shop)
+
+(defcustom org-shop-seasons-file nil
+  "Path to seasons.org file containing seasonal produce data.
+If nil, seasonal produce table will not be generated."
+  :type '(choice (const :tag "Disabled" nil)
+                 (file :tag "Seasons file path"))
+  :group 'org-shop)
+
+(defcustom org-shop-seasonal-heading "seasonal fruit + veg"
+  "Heading name for seasonal produce subheading."
   :type 'string
   :group 'org-shop)
 
@@ -370,6 +401,117 @@ In daily files (with \"done\" column), marks items as done."
   (message "All marks cleared"))
 
 ;;; ============================================================================
+;;; Seasonal Produce Functions
+;;; ============================================================================
+
+(defun org-shop--season-from-date (date-string)
+  "Return Australian season name for DATE-STRING (YYYY-MM-DD format).
+Returns one of: \"Summer\", \"Autumn\", \"Winter\", \"Spring\"."
+  (let ((month (string-to-number (substring date-string 5 7))))
+    (cond
+     ((member month '(12 1 2)) "Summer")
+     ((member month '(3 4 5)) "Autumn")
+     ((member month '(6 7 8)) "Winter")
+     ((member month '(9 10 11)) "Spring"))))
+
+(defun org-shop--parse-seasons-file ()
+  "Parse `org-shop-seasons-file' and return alist of seasons to produce.
+Returns ((\"Summer\" . ((\"Fruit\" . (items...)) (\"Vegetables\" . (items...))))
+         (\"Autumn\" . ...) ...)."
+  (when (and org-shop-seasons-file
+             (file-exists-p org-shop-seasons-file))
+    (with-temp-buffer
+      (insert-file-contents org-shop-seasons-file)
+      (org-mode)
+      (let ((seasons '())
+            (current-season nil)
+            (current-type nil))
+        (goto-char (point-min))
+        (while (not (eobp))
+          (when (looking-at "^\\(\\*+\\)\\s-+\\(.+?\\)\\s-*\\(:.+:\\)?$")
+            (let* ((level (length (match-string 1)))
+                   (heading (string-trim (match-string 2)))
+                   (heading-clean (replace-regexp-in-string "\\s-*(.*)" "" heading)))
+              (cond
+               ;; Level 1: Season heading (e.g., "Summer (Dec-Feb)")
+               ((= level 1)
+                (when (string-match "^\\(Summer\\|Autumn\\|Winter\\|Spring\\|Year-Round\\)" heading)
+                  (setq current-season (match-string 1 heading))
+                  (unless (assoc current-season seasons)
+                    (push (cons current-season '()) seasons))))
+               ;; Level 2: Type heading (Fruit/Vegetables)
+               ((= level 2)
+                (when (and current-season
+                           (member heading-clean '("Fruit" "Vegetables")))
+                  (setq current-type heading-clean)))
+               ;; Level 3: Individual produce item
+               ((= level 3)
+                (when (and current-season current-type)
+                  (let* ((season-data (assoc current-season seasons))
+                         (type-data (assoc current-type (cdr season-data)))
+                         (item-name heading-clean))
+                    (if type-data
+                        (setcdr type-data (append (cdr type-data) (list item-name)))
+                      (setcdr season-data
+                              (append (cdr season-data)
+                                      (list (cons current-type (list item-name))))))))))))
+          (forward-line 1))
+        (nreverse seasons)))))
+
+(defun org-shop--get-seasonal-produce (date-string)
+  "Get seasonal produce for DATE-STRING.
+Returns (FRUITS . VEGETABLES) where each is a list of item names.
+Includes Year-Round items."
+  (let* ((season (org-shop--season-from-date date-string))
+         (all-seasons (org-shop--parse-seasons-file))
+         (season-data (cdr (assoc season all-seasons)))
+         (year-round-data (cdr (assoc "Year-Round" all-seasons)))
+         (fruits (append (cdr (assoc "Fruit" year-round-data))
+                         (cdr (assoc "Fruit" season-data))))
+         (vegetables (append (cdr (assoc "Vegetables" year-round-data))
+                             (cdr (assoc "Vegetables" season-data)))))
+    (cons fruits vegetables)))
+
+(defun org-shop--current-heading-level ()
+  "Return the level of the current org heading, or 0 if not under a heading."
+  (save-excursion
+    (condition-case nil
+        (progn
+          (org-back-to-heading t)
+          (org-current-level))
+      (error 0))))
+
+(defun org-shop--insert-seasonal-table (date-string)
+  "Insert seasonal produce subheading and table for DATE-STRING.
+Inserts at point with heading level one deeper than current heading."
+  (when org-shop-seasons-file
+    (let* ((produce (org-shop--get-seasonal-produce date-string))
+           (fruits (car produce))
+           (vegetables (cdr produce))
+           (current-level (org-shop--current-heading-level))
+           (sub-level (1+ current-level))
+           (stars (make-string sub-level ?*)))
+      (when (or fruits vegetables)
+        ;; Insert blank line and subheading
+        (insert "\n\n" stars " " org-shop-seasonal-heading "\n\n")
+        ;; Insert table header
+        (insert "|------+-----------+------+-----------|\n")
+        (insert "| done | fruit     | done | vegetable |\n")
+        (insert "|------+-----------+------+-----------|\n")
+        ;; Insert rows - pair fruits and vegetables
+        (let ((max-rows (max (length fruits) (length vegetables))))
+          (dotimes (i max-rows)
+            (let ((fruit (or (nth i fruits) ""))
+                  (veg (or (nth i vegetables) "")))
+              (insert (format "| [ ]  | %s | [ ]  | %s |\n" fruit veg)))))
+        ;; Insert bottom hline
+        (insert "|------+-----------+------+-----------|\n")
+        ;; Align table
+        (save-excursion
+          (forward-line -1)
+          (org-table-align))))))
+
+;;; ============================================================================
 ;;; Core Functions - Generate Shopping List
 ;;; ============================================================================
 
@@ -545,7 +687,8 @@ Only counts rows where new_price is filled. Returns with +/- prefix."
 ;;;###autoload
 (defun org-shop-generate ()
   "Generate shopping list from marked items in shop file.
-Inserts table at point with marked products."
+Inserts table at point with marked products.
+If `org-shop-seasons-file' is set, also inserts seasonal produce subheading."
   (interactive)
   (let* ((date (org-shop--page-date))
          (shop-name (org-shop--resolve-shop))
@@ -555,6 +698,9 @@ Inserts table at point with marked products."
       (user-error "No marked items found in %s" shop-name))
     ;; Insert the table
     (org-shop--insert-shopping-table marked-rows)
+    ;; Insert seasonal produce subheading if configured
+    (when org-shop-seasons-file
+      (org-shop--insert-seasonal-table date))
     ;; Clear marks and update last_bought in shop file
     (let ((products (mapcar (lambda (row) (cdr (assoc "product" row)))
                             marked-rows)))
