@@ -129,6 +129,16 @@ If nil, seasonal table appears for all shops."
                  (string :tag "Required filetag"))
   :group 'org-shop)
 
+(defcustom org-shop-complete-auto-fill t
+  "If non-nil, auto-fill price/quantity/notes when selecting a product."
+  :type 'boolean
+  :group 'org-shop)
+
+(defcustom org-shop-complete-show-annotations t
+  "If non-nil, show price and quantity annotations in completion candidates."
+  :type 'boolean
+  :group 'org-shop)
+
 ;;; ============================================================================
 ;;; Column Configuration
 ;;; ============================================================================
@@ -150,6 +160,14 @@ Column order: product first, then done, for better readability."
 
 (defvar org-shop--mark-char "X"
   "Character used to mark items (inside brackets).")
+
+(defvar org-shop--product-cache (make-hash-table :test 'equal)
+  "Cache of products per shop file.
+Key: shop-file path, Value: (mod-time . list-of-product-names).")
+
+(defvar org-shop--product-data-cache (make-hash-table :test 'equal)
+  "Cache mapping shop files to product data hash tables.
+Key: shop-file path, Value: hash-table of (downcase-product -> row-alist).")
 
 (defun org-shop--page-date ()
   "Extract date from current buffer filename if it matches YYYY-MM-DD.
@@ -1290,12 +1308,207 @@ Formats all price cells to 2 decimal places."
         (org-shop--set-cell "new_price" (format "%s%.2f" (if (>= total-diff 0) "+" "") total-diff))
         (org-table-align)))))
 
+;;; ============================================================================
+;;; Product Completion Functions
+;;; ============================================================================
+
+(defun org-shop--current-column-name ()
+  "Return the column name at point, or nil if not in a table cell."
+  (when (org-at-table-p)
+    (let* ((col-num (org-table-current-column))
+           (columns (org-shop--get-table-columns)))
+      (when (and col-num (> col-num 0) (<= col-num (length columns)))
+        (nth (1- col-num) columns)))))
+
+(defun org-shop--in-shopping-table-product-column-p ()
+  "Return non-nil if point is in the product column of a shopping table.
+Shopping tables are identified by having `done' and `known_price' columns."
+  (and (org-at-table-p)
+       (not (org-at-table-hline-p))
+       (org-shop--has-column-p "done")
+       (org-shop--has-column-p "known_price")
+       (string-equal-ignore-case (or (org-shop--current-column-name) "") "product")))
+
+(defun org-shop--get-all-products-for-completion ()
+  "Get all products from the associated shop file for completion.
+Returns list of product names.  Caches product data for auto-fill."
+  (let* ((shop-name (org-shop--resolve-shop))
+         (shop-file (when shop-name (org-shop--find-shop-file shop-name))))
+    (when shop-file
+      ;; Check cache validity
+      (let ((cached (gethash shop-file org-shop--product-cache))
+            (mod-time (file-attribute-modification-time (file-attributes shop-file))))
+        (if (and cached (equal (car cached) mod-time))
+            (cdr cached)  ; Return cached products
+          ;; Rebuild cache
+          (let ((products '())
+                (data-map (make-hash-table :test 'equal)))
+            (with-temp-buffer
+              (insert-file-contents shop-file)
+              (org-mode)
+              (when (org-shop--goto-table-after-heading org-shop-source-heading)
+                (let ((rows (org-shop--parse-table)))
+                  (dolist (row rows)
+                    (let ((product (cdr (assoc "product" row))))
+                      (when (and product (not (string-empty-p product)))
+                        (push product products)
+                        (puthash (downcase product) row data-map)))))))
+            (puthash shop-file (cons mod-time (nreverse products)) org-shop--product-cache)
+            (puthash shop-file data-map org-shop--product-data-cache)
+            (cdr (gethash shop-file org-shop--product-cache))))))))
+
+(defun org-shop--completion-annotate (candidate)
+  "Return annotation for product CANDIDATE showing price and quantity."
+  (when org-shop-complete-show-annotations
+    (let* ((shop-name (org-shop--resolve-shop))
+           (shop-file (when shop-name (org-shop--find-shop-file shop-name)))
+           (data-map (when shop-file (gethash shop-file org-shop--product-data-cache)))
+           (row (when data-map (gethash (downcase candidate) data-map))))
+      (when row
+        (let ((price (cdr (assoc "price" row)))
+              (qty (cdr (assoc "quantity" row))))
+          (format " %s%s"
+                  (if (and price (not (string-empty-p price))) (format "$%s" price) "")
+                  (if (and qty (not (string-empty-p qty))) (format " %s" qty) "")))))))
+
+(defun org-shop--completion-exit-function (candidate status)
+  "Auto-fill row with product data after completion.
+CANDIDATE is the selected product, STATUS indicates completion type."
+  (when (and org-shop-complete-auto-fill
+             (eq status 'finished))
+    (let* ((shop-name (org-shop--resolve-shop))
+           (shop-file (when shop-name (org-shop--find-shop-file shop-name)))
+           (data-map (when shop-file (gethash shop-file org-shop--product-data-cache)))
+           (row (when data-map (gethash (downcase candidate) data-map))))
+      (when row
+        (let ((price (cdr (assoc "price" row)))
+              (qty (cdr (assoc "quantity" row)))
+              (notes (cdr (assoc "notes" row))))
+          ;; Fill known_price from price
+          (when (and price (not (string-empty-p price)))
+            (org-shop--set-cell "known_price" price))
+          ;; Fill quantity
+          (when (and qty (not (string-empty-p qty)))
+            (org-shop--set-cell "quantity" qty))
+          ;; Fill notes
+          (when (and notes (not (string-empty-p notes)))
+            (org-shop--set-cell "notes" notes)))))))
+
+(defun org-shop-complete-capf ()
+  "Completion-at-point function for org-shop product completion."
+  (when (org-shop--in-shopping-table-product-column-p)
+    (let* ((bounds (bounds-of-thing-at-point 'symbol))
+           (start (or (car bounds) (point)))
+           (end (or (cdr bounds) (point)))
+           (candidates (org-shop--get-all-products-for-completion)))
+      (when candidates
+        (list start end candidates
+              :exclusive 'no
+              :annotation-function #'org-shop--completion-annotate
+              :exit-function #'org-shop--completion-exit-function)))))
+
+;;;###autoload
+(define-minor-mode org-shop-complete-mode
+  "Minor mode for fuzzy autocompletion of products in org-shop tables.
+When enabled, typing in the product column of a shopping table
+provides completion against all products in the associated shop file."
+  :lighter " ShopC"
+  :group 'org-shop
+  (if org-shop-complete-mode
+      (progn
+        (add-hook 'completion-at-point-functions #'org-shop-complete-capf nil t)
+        (setq-local completion-ignore-case t))
+    (remove-hook 'completion-at-point-functions #'org-shop-complete-capf t)))
+
+;;; ============================================================================
+;;; Add Item Command
+;;; ============================================================================
+
+(defun org-shop--insert-item-row (product count discount quantity notes known-price new-price)
+  "Insert a new item row before the summary line.
+PRODUCT, COUNT, DISCOUNT, QUANTITY, NOTES, KNOWN-PRICE, and NEW-PRICE
+are cell values.  Handles table formatting automatically."
+  (save-excursion
+    ;; Find the summary row
+    (let ((summary-line nil))
+      (dolist (line-num (org-shop--table-data-lines))
+        (org-table-goto-line line-num)
+        (when (string= (org-shop--get-cell "product") "Summary")
+          (setq summary-line line-num)))
+      (if summary-line
+          (progn
+            ;; Go to summary line and insert row above
+            (org-table-goto-line summary-line)
+            (beginning-of-line)
+            ;; Insert new row before summary (after the hline above it)
+            (forward-line -1)  ; Move to hline before summary
+            (end-of-line)
+            (insert "\n")
+            ;; Columns: product | done | count | discount | quantity | notes | known_price | new_price
+            (insert (format "| %s | [ ] | %s | %s | %s | %s | %s | %s |"
+                            product
+                            (if (string-empty-p count) "" count)
+                            (or discount "")
+                            (or quantity "")
+                            (or notes "")
+                            (if (and known-price (not (string-empty-p known-price)))
+                                (format "%.2f" (string-to-number known-price))
+                              "-")
+                            (if (and new-price (not (string-empty-p new-price)))
+                                (format "%.2f" (string-to-number new-price))
+                              "")))
+            (org-table-align))
+        (user-error "No Summary row found in table")))))
+
+;;;###autoload
+(defun org-shop-add-item ()
+  "Add a new item to the shopping table via minibuffer prompts.
+Prompts for product (with fuzzy completion), count, discount, quantity,
+notes, and prices.  Inserts row before the summary line and recalculates totals."
+  (interactive)
+  (unless (org-at-table-p)
+    (user-error "Not in an org table"))
+  (unless (org-shop--has-column-p "done")
+    (user-error "Not in a shopping table (missing 'done' column)"))
+  (let* ((candidates (org-shop--get-all-products-for-completion))
+         ;; Product prompt with fuzzy completion
+         (product (completing-read "Product: " candidates nil nil))
+         ;; Look up existing data for auto-fill defaults
+         (shop-name (org-shop--resolve-shop))
+         (shop-file (when shop-name (org-shop--find-shop-file shop-name)))
+         (data-map (when shop-file (gethash shop-file org-shop--product-data-cache)))
+         (existing (when data-map (gethash (downcase product) data-map)))
+         ;; Extract defaults from existing product data
+         (default-price (when existing (cdr (assoc "price" existing))))
+         (default-qty (when existing (cdr (assoc "quantity" existing))))
+         (default-notes (when existing (cdr (assoc "notes" existing))))
+         ;; Prompt for remaining fields with defaults
+         (count (read-string "Count [1]: " nil nil "1"))
+         (discount (read-string "Discount (e.g., 0.3 for 30% off): "))
+         (quantity (read-string (format "Quantity%s: "
+                                        (if default-qty (format " [%s]" default-qty) ""))
+                                nil nil default-qty))
+         (notes (read-string (format "Notes%s: "
+                                     (if default-notes (format " [%s]" default-notes) ""))
+                             nil nil default-notes))
+         (known-price (read-string (format "Known price%s: "
+                                           (if default-price (format " [%s]" default-price) ""))
+                                   nil nil default-price))
+         (new-price (read-string "New price (leave empty if same): ")))
+    ;; Find summary line and insert before it
+    (org-shop--insert-item-row product count discount quantity notes known-price new-price)
+    ;; Recalculate summary
+    (org-shop-recalculate)
+    (message "Added: %s" product)))
+
 (defvar org-shop-command-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "m") #'org-shop-mark)
     (define-key map (kbd "g") #'org-shop-generate)
     (define-key map (kbd "s") #'org-shop-sync)
     (define-key map (kbd "c") #'org-shop-clear-marks)
+    (define-key map (kbd "t") #'org-shop-complete-mode)
+    (define-key map (kbd "a") #'org-shop-add-item)
     map)
   "Command map for org-shop.
 \\{org-shop-command-map}")
@@ -1307,7 +1520,9 @@ Binds commands under `org-shop-keymap-prefix' (default C-c S):
   <prefix> m - Toggle mark (next in shop, done in daily)
   <prefix> g - Generate shopping list
   <prefix> s - Sync to shop (also recalculates summary)
-  <prefix> c - Clear all marks"
+  <prefix> c - Clear all marks
+  <prefix> t - Toggle product completion mode
+  <prefix> a - Add item via minibuffer prompts"
   (interactive)
   (when org-shop-setup-keymaps
     (global-set-key (kbd org-shop-keymap-prefix) org-shop-command-map))
