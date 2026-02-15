@@ -203,9 +203,28 @@ Falls back to today's date."
         (completing-read "Select shop: " shops nil t)
       (user-error "No shop files found in %s" org-shop-directory))))
 
+(defun org-shop--get-shop-file-id (shop-file)
+  "Get the org ID from SHOP-FILE, or nil if none."
+  (when (and shop-file (file-exists-p shop-file))
+    (with-temp-buffer
+      (insert-file-contents shop-file nil 0 1000)  ; Only read first 1KB
+      (goto-char (point-min))
+      (when (re-search-forward "^:ID:\\s-*\\(.+\\)$" nil t)
+        (string-trim (match-string 1))))))
+
+(defun org-shop--get-shop-aliases (shop-file)
+  "Get ROAM_ALIASES from SHOP-FILE as a list of strings."
+  (when (and shop-file (file-exists-p shop-file))
+    (with-temp-buffer
+      (insert-file-contents shop-file nil 0 2000)  ; Only read first 2KB
+      (goto-char (point-min))
+      (when (re-search-forward "^:ROAM_ALIASES:\\s-*\\(.+\\)$" nil t)
+        (split-string (string-trim (match-string 1)) "\\s-+" t)))))
+
 (defun org-shop--get-shop-from-heading ()
   "Extract shop name from current heading.
-E.g., `** TODO Aldi Run' -> \"aldi\", `** Woolworths Trip' -> \"woolworths\"."
+E.g., `** TODO Aldi Run' -> \"aldi\", `** Woolworths Trip' -> \"woolworths\".
+Also checks ROAM_ALIASES in shop files (e.g., \"woolies\" -> \"woolworths\")."
   (save-excursion
     (org-back-to-heading t)
     (let ((heading (org-get-heading t t t t)))
@@ -215,19 +234,64 @@ E.g., `** TODO Aldi Run' -> \"aldi\", `** Woolworths Trip' -> \"woolworths\"."
                (normalized (replace-regexp-in-string
                             "\\s-*\\(run\\|trip\\|shop\\|shopping\\|list\\)\\s-*$"
                             "" normalized))
-               (normalized (string-trim normalized)))
-          ;; Check if this matches a known shop
-          (let ((shops (org-shop--list-shops)))
-            (cl-find-if (lambda (shop)
-                          (string-match-p (regexp-quote shop) normalized))
-                        shops)))))))
+               (normalized (string-trim normalized))
+               (shops (org-shop--list-shops)))
+          ;; First try to match by shop name directly
+          (or (cl-find-if (lambda (shop)
+                            (string-match-p (regexp-quote shop) normalized))
+                          shops)
+              ;; Then try to match by ROAM_ALIASES
+              (cl-find-if (lambda (shop)
+                            (let* ((shop-file (org-shop--find-shop-file shop))
+                                   (aliases (org-shop--get-shop-aliases shop-file)))
+                              (cl-some (lambda (alias)
+                                         (string-match-p (regexp-quote (downcase alias))
+                                                         normalized))
+                                       aliases)))
+                          shops)))))))
+
+(defun org-shop--linkify-shop-in-heading (shop-name)
+  "Replace shop name in current heading with an org ID link.
+SHOP-NAME is the resolved shop (e.g., \"costco\").
+Transforms \"Costco Shop\" to \"[[id:xxx][Costco]] Shop\".
+Also matches ROAM_ALIASES (e.g., \"Woolies\" -> link to woolworths)."
+  (let* ((shop-file (org-shop--find-shop-file shop-name))
+         (shop-id (org-shop--get-shop-file-id shop-file))
+         (aliases (org-shop--get-shop-aliases shop-file)))
+    (when shop-id
+      (save-excursion
+        (org-back-to-heading t)
+        (let* ((heading-start (point))
+               (heading-end (line-end-position))
+               (heading-text (buffer-substring heading-start heading-end)))
+          ;; Skip if already contains an ID link
+          (unless (string-match-p "\\[\\[id:" heading-text)
+            ;; Build list of terms to search for: shop name + aliases
+            (let ((search-terms (cons shop-name (or aliases '())))
+                  (case-fold-search t))  ; Case-insensitive matching
+              ;; Find and replace the first matching term
+              (cl-loop for term in search-terms
+                       when (string-match (regexp-quote term) heading-text)
+                       do (let* ((match-start (+ heading-start (match-beginning 0)))
+                                 (match-end (+ heading-start (match-end 0)))
+                                 (original-text (buffer-substring match-start match-end))
+                                 (link (format "[[id:%s][%s]]" shop-id original-text)))
+                            (goto-char match-start)
+                            (delete-region match-start match-end)
+                            (insert link))
+                       and return t))))))))
 
 (defun org-shop--resolve-shop ()
-  "Determine which shop to use based on settings and context."
-  (if org-shop-detect-shop-from-heading
-      (or (org-shop--get-shop-from-heading)
-          (org-shop--prompt-shop))
-    (org-shop--prompt-shop)))
+  "Determine which shop to use based on settings and context.
+Also linkifies the shop name in the heading with an org ID link."
+  (let ((shop (if org-shop-detect-shop-from-heading
+                  (or (org-shop--get-shop-from-heading)
+                      (org-shop--prompt-shop))
+                (org-shop--prompt-shop))))
+    ;; Linkify the shop name in the heading
+    (when shop
+      (org-shop--linkify-shop-in-heading shop))
+    shop))
 
 ;;; ============================================================================
 ;;; Utility Functions - Table Operations
