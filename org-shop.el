@@ -1350,7 +1350,11 @@ Returns list of product names.  Caches product data for auto-fill."
                 (let ((rows (org-shop--parse-table)))
                   (dolist (row rows)
                     (let ((product (cdr (assoc "product" row))))
-                      (when (and product (not (string-empty-p product)))
+                      ;; Exclude TOTAL, Summary, and empty products
+                      (when (and product
+                                 (not (string-empty-p product))
+                                 (not (string-equal-ignore-case product "TOTAL"))
+                                 (not (string-equal-ignore-case product "Summary")))
                         (push product products)
                         (puthash (downcase product) row data-map)))))))
             (puthash shop-file (cons mod-time (nreverse products)) org-shop--product-cache)
@@ -1437,15 +1441,13 @@ are cell values.  Handles table formatting automatically."
           (setq summary-line line-num)))
       (if summary-line
           (progn
-            ;; Go to summary line and insert row above
+            ;; Go to summary line and insert row above the hline
             (org-table-goto-line summary-line)
             (beginning-of-line)
-            ;; Insert new row before summary (after the hline above it)
             (forward-line -1)  ; Move to hline before summary
-            (end-of-line)
-            (insert "\n")
+            ;; Insert new row BEFORE the hline (so hline stays before Summary)
             ;; Columns: product | done | count | discount | quantity | notes | known_price | new_price
-            (insert (format "| %s | [ ] | %s | %s | %s | %s | %s | %s |"
+            (insert (format "| %s | [ ] | %s | %s | %s | %s | %s | %s |\n"
                             product
                             (if (string-empty-p count) "" count)
                             (or discount "")
