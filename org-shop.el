@@ -1511,7 +1511,7 @@ are cell values.  Handles table formatting automatically."
             (forward-line -1)  ; Move to hline before summary
             ;; Insert new row BEFORE the hline (so hline stays before Summary)
             ;; Columns: product | done | count | discount | quantity | notes | known_price | new_price
-            (insert (format "| %s | [ ] | %s | %s | %s | %s | %s | %s |\n"
+            (insert (format "| %s | [X] | %s | %s | %s | %s | %s | %s |\n"
                             product
                             (if (string-empty-p count) "" count)
                             (or discount "")
@@ -1567,6 +1567,110 @@ notes, and prices.  Inserts row before the summary line and recalculates totals.
     (org-shop-recalculate)
     (message "Added: %s" product)))
 
+(defun org-shop--get-previous-purchase-date (shop-file product current-date)
+  "Get the most recent purchase date for PRODUCT before CURRENT-DATE.
+Returns the date string or nil if no previous purchase exists."
+  (with-current-buffer (find-file-noselect shop-file)
+    (save-excursion
+      (goto-char (point-min))
+      (when (org-shop--goto-table-after-heading org-shop-history-heading)
+        (let ((dates '()))
+          ;; Collect all dates for this product
+          (while (and (org-at-table-p) (not (eobp)))
+            (unless (org-at-table-hline-p)
+              (let ((row-product (string-trim (or (org-table-get nil 1) "")))
+                    (row-date (string-trim (or (org-table-get nil 2) ""))))
+                (when (and (string-equal-ignore-case row-product product)
+                           (not (string-equal row-date current-date))
+                           (not (string-equal-ignore-case row-product "TOTAL"))
+                           (not (string-empty-p row-date)))
+                  (push row-date dates))))
+            (forward-line 1))
+          ;; Return the most recent date (dates are in various order, sort descending)
+          (when dates
+            (car (sort dates #'string>))))))))
+
+(defun org-shop--delete-history-entry (shop-file product date)
+  "Delete the history entry for PRODUCT on DATE from SHOP-FILE."
+  (with-current-buffer (find-file-noselect shop-file)
+    (save-excursion
+      (goto-char (point-min))
+      (when (org-shop--goto-table-after-heading org-shop-history-heading)
+        (let ((found nil))
+          (while (and (not found) (org-at-table-p) (not (eobp)))
+            (unless (org-at-table-hline-p)
+              (let ((row-product (string-trim (or (org-table-get nil 1) "")))
+                    (row-date (string-trim (or (org-table-get nil 2) ""))))
+                (when (and (string-equal-ignore-case row-product product)
+                           (string-equal row-date date))
+                  (org-shop--delete-table-row)
+                  (setq found t))))
+            (unless found (forward-line 1)))
+          (when found
+            (org-shop--recalculate-history-total)
+            (save-buffer))
+          found)))))
+
+(defun org-shop--update-last-bought (shop-file product new-date)
+  "Update the last_bought column for PRODUCT in SHOP-FILE to NEW-DATE.
+If NEW-DATE is nil, delete the product from the regular table."
+  (with-current-buffer (find-file-noselect shop-file)
+    (save-excursion
+      (goto-char (point-min))
+      (when (org-shop--goto-table-after-heading org-shop-source-heading)
+        (let ((found nil))
+          (while (and (not found) (org-at-table-p) (not (eobp)))
+            (unless (org-at-table-hline-p)
+              (let ((row-product (string-trim (or (org-shop--get-cell "product") ""))))
+                (when (string-equal-ignore-case row-product product)
+                  (if new-date
+                      ;; Update last_bought to new date
+                      (progn
+                        (org-shop--set-cell "last_bought" new-date)
+                        (setq found t))
+                    ;; Delete the product row entirely
+                    (org-shop--delete-table-row)
+                    (setq found t)))))
+            (unless found (forward-line 1)))
+          (when found
+            (save-buffer))
+          found)))))
+
+;;;###autoload
+(defun org-shop-delete-item ()
+  "Delete the current item from the shopping table.
+Also removes the corresponding history entry and restores the previous
+last_bought date.  If no previous purchase exists, deletes the product
+from the shop's regular table entirely."
+  (interactive)
+  (unless (org-at-table-p)
+    (user-error "Not in an org table"))
+  (when (org-at-table-hline-p)
+    (user-error "Cannot delete a separator line"))
+  (let ((product (org-shop--get-cell "product")))
+    (when (or (not product)
+              (string-empty-p product)
+              (string-equal-ignore-case product "Summary"))
+      (user-error "Cannot delete this row"))
+    (when (yes-or-no-p (format "Delete '%s' and remove from history? " product))
+      (let* ((date (org-shop--page-date))
+             (shop-name (org-shop--resolve-shop))
+             (shop-file (when shop-name (org-shop--find-shop-file shop-name))))
+        (when shop-file
+          ;; Get previous purchase date before deleting history
+          (let ((prev-date (org-shop--get-previous-purchase-date shop-file product date)))
+            ;; Delete history entry
+            (org-shop--delete-history-entry shop-file product date)
+            ;; Update or delete from regular table
+            (org-shop--update-last-bought shop-file product prev-date)
+            (if prev-date
+                (message "Deleted '%s', restored last_bought to %s" product prev-date)
+              (message "Deleted '%s' from history and regular table" product))))
+        ;; Delete the row from current shopping table
+        (org-shop--delete-table-row)
+        ;; Recalculate summary
+        (org-shop-recalculate)))))
+
 (defvar org-shop-command-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "m") #'org-shop-mark)
@@ -1575,6 +1679,7 @@ notes, and prices.  Inserts row before the summary line and recalculates totals.
     (define-key map (kbd "c") #'org-shop-clear-marks)
     (define-key map (kbd "t") #'org-shop-complete-mode)
     (define-key map (kbd "a") #'org-shop-add-item)
+    (define-key map (kbd "d") #'org-shop-delete-item)
     map)
   "Command map for org-shop.
 \\{org-shop-command-map}")
@@ -1588,7 +1693,8 @@ Binds commands under `org-shop-keymap-prefix' (default C-c S):
   <prefix> s - Sync to shop (also recalculates summary)
   <prefix> c - Clear all marks
   <prefix> t - Toggle product completion mode
-  <prefix> a - Add item via minibuffer prompts"
+  <prefix> a - Add item via minibuffer prompts
+  <prefix> d - Delete item and remove from history"
   (interactive)
   (when org-shop-setup-keymaps
     (global-set-key (kbd org-shop-keymap-prefix) org-shop-command-map))
