@@ -650,7 +650,7 @@ Inserts at the same level as current heading (as a sibling)."
             ;; Insert blank line and heading with season tag (at same level, not sub-level)
             (insert (format "\n\n%s %s %s:%s:\n\n"
                             stars heading-text
-                            (make-string (max 0 (- 70 (length heading-text) current-level 3)) ? )
+                            (make-string (max 0 (- 70 (length heading-text) current-level 3)) ?\s)
                             season-tag))
             ;; Insert table header
             (insert "|------+--------------+------+--------------|\n")
@@ -1005,10 +1005,10 @@ Returns point at history table."
               (insert (format "\n\n%s %s%s:noexport:\n"
                               (make-string source-level ?*)
                               org-shop-history-heading
-                              (make-string (max 1 (- 60 (length org-shop-history-heading))) ? )))
+                              (make-string (max 1 (- 60 (length org-shop-history-heading))) ?\s)))
               (insert "|---------+------+-------+----------+-------|\n")
               (insert "| product | date | count | discount | price |\n")
-              (insert "|---------+------+-------+----------+-------|\n"))))))
+              (insert "|---------+------+-------+----------+-------|\n")))))
       ;; Return to history table
       (org-shop--goto-table-after-heading org-shop-history-heading))))
 
