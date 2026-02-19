@@ -72,7 +72,7 @@
   :type 'string
   :group 'org-shop)
 
-(defcustom org-shop-source-heading "regular"
+(defcustom org-shop-source-heading "inventory"
   "Heading name containing the product table in shop files."
   :type 'string
   :group 'org-shop)
@@ -379,6 +379,17 @@ Returns point if found, nil otherwise."
            nil t)
       (beginning-of-line)
       (point))))
+
+(defun org-shop--get-heading-level (heading-name)
+  "Get the level (number of stars) for HEADING-NAME in current buffer.
+Returns nil if heading not found."
+  (save-excursion
+    (goto-char (point-min))
+    (let ((case-fold-search t))
+      (when (re-search-forward
+             (concat "^\\(\\*+\\)\\s-+" (regexp-quote heading-name) "\\(\\s-\\|:\\|$\\)")
+             nil t)
+        (length (match-string 1))))))
 
 (defun org-shop--goto-table-after-heading (heading-name)
   "Navigate to first table under HEADING-NAME.
@@ -954,22 +965,31 @@ Creates notes column if needed when notes are provided."
 
 (defun org-shop--ensure-history-table (shop-file)
   "Ensure purchase history table exists in SHOP-FILE.
-Creates it if missing. Returns point at history table."
+Creates it if missing. Migrates old 4-column format if needed.
+Returns point at history table."
   (with-current-buffer (find-file-noselect shop-file)
     (save-excursion
       ;; Try to find existing history heading
       (goto-char (point-min))
       (let ((case-fold-search t))
-        (unless (re-search-forward
-                 (concat "^\\*+\\s-+" (regexp-quote org-shop-history-heading))
-                 nil t)
-          ;; Create history section under source heading
+        (if (re-search-forward
+             (concat "^\\*+\\s-+" (regexp-quote org-shop-history-heading))
+             nil t)
+            ;; Found existing - check if migration needed
+            (when (org-shop--goto-table-after-heading org-shop-history-heading)
+              (when (org-shop--history-needs-migration-p)
+                (org-shop--migrate-history-table)))
+          ;; Create history section as sibling of source heading
           (when (org-shop--goto-heading org-shop-source-heading)
-            (org-end-of-subtree)
-            (insert "\n\n*** " org-shop-history-heading "                                        :noexport:\n")
-            (insert "|---------+------+-------+-------|\n")
-            (insert "| product | date | count | price |\n")
-            (insert "|---------+------+-------+-------|\n"))))
+            (let ((source-level (org-shop--get-heading-level org-shop-source-heading)))
+              (org-end-of-subtree)
+              (insert (format "\n\n%s %s%s:noexport:\n"
+                              (make-string source-level ?*)
+                              org-shop-history-heading
+                              (make-string (max 1 (- 60 (length org-shop-history-heading))) ? )))
+              (insert "|---------+------+-------+----------+-------|\n")
+              (insert "| product | date | count | discount | price |\n")
+              (insert "|---------+------+-------+----------+-------|\n"))))))
       ;; Return to history table
       (org-shop--goto-table-after-heading org-shop-history-heading))))
 
@@ -998,6 +1018,34 @@ Point must be at start of history table."
     (delete-region start (point)))
   (org-table-align))
 
+(defun org-shop--history-needs-migration-p ()
+  "Return non-nil if history table at point needs discount column migration.
+Returns t if table header has 4 columns (old format) instead of 5 (new format)."
+  (when (org-at-table-p)
+    (save-excursion
+      ;; Go to header row
+      (org-table-goto-line 1)
+      (let ((header (org-table-get nil 4)))
+        ;; Old format: column 4 is "price", new format: column 4 is "discount"
+        (and header
+             (string-match-p "price" (downcase (string-trim header))))))))
+
+(defun org-shop--migrate-history-table ()
+  "Migrate history table at point to include discount column.
+Inserts empty discount column between count and price columns."
+  (when (org-at-table-p)
+    (save-excursion
+      ;; Find the table start
+      (org-table-goto-line 1)
+      ;; Insert a column before the price column (column 4)
+      (org-table-goto-column 4)
+      (org-table-insert-column)
+      ;; Set the header for the new column
+      (org-table-put 1 4 "discount")
+      ;; All data rows now have empty discount (which is correct for old entries)
+      (org-table-align)
+      (message "Migrated history table to include discount column"))))
+
 (defun org-shop--reorganize-history-table ()
   "Reorganize history table: sort by date descending with dividers between date groups.
 Point must be within the history table."
@@ -1021,12 +1069,13 @@ Point must be within the history table."
           (let ((product (string-trim (or (org-table-get nil 1) "")))
                 (date (string-trim (or (org-table-get nil 2) "")))
                 (count-str (string-trim (or (org-table-get nil 3) "")))
-                (price-str (string-trim (or (org-table-get nil 4) ""))))
+                (discount-str (string-trim (or (org-table-get nil 4) "")))
+                (price-str (string-trim (or (org-table-get nil 5) ""))))
             (if (string= product "TOTAL")
-                (setq total-row (list product date count-str price-str))
+                (setq total-row (list product date count-str discount-str price-str))
               ;; Only collect rows with valid date format
               (when (string-match-p "^[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}$" date)
-                (push (list product date count-str price-str) rows))))
+                (push (list product date count-str discount-str price-str) rows))))
           (forward-line 1)))
       (setq table-end (point))
       ;; Sort rows by date descending
@@ -1045,34 +1094,46 @@ Point must be within the history table."
           (let ((product (nth 0 row))
                 (date (nth 1 row))
                 (count-str (nth 2 row))
-                (price-str (nth 3 row)))
+                (discount-str (nth 3 row))
+                (price-str (nth 4 row)))
             ;; Add hline between different dates
             (when (and prev-date (not (string= prev-date date)))
-              (insert "|--------------------+------------+--------+--------|\n"))
-            (insert (format "| %s | %s | %s | %s |\n"
-                            product date count-str price-str))
+              (insert "|--------------------+------------+--------+----------+--------|\n"))
+            (insert (format "| %s | %s | %s | %s | %s |\n"
+                            product date count-str discount-str price-str))
             (setq prev-date date))))
       ;; Add TOTAL row with dividers if we have data
       (when (and rows total-row)
-        (insert "|--------------------+------------+--------+--------|\n")
-        (insert (format "| %s | %s | %s | %s |\n"
+        (insert "|--------------------+------------+--------+----------+--------|\n")
+        (insert (format "| %s | %s | %s | %s | %s |\n"
                         (nth 0 total-row) (nth 1 total-row)
-                        (nth 2 total-row) (nth 3 total-row)))
-        (insert "|--------------------+------------+--------+--------|\n"))
+                        (nth 2 total-row) (nth 3 total-row) (nth 4 total-row)))
+        (insert "|--------------------+------------+--------+----------+--------|\n"))
       ;; Align the table
       (org-table-goto-line 1)
       (org-table-align))))
 
-(defun org-shop--upsert-history (shop-file product count price &optional date)
+(defun org-shop--upsert-history (shop-file product count price &optional date discount)
   "Upsert purchase history entry for PRODUCT to SHOP-FILE.
 DATE is the purchase date; defaults to today.
-If entry for PRODUCT + date exists: update count/price.
+DISCOUNT is the discount rate (e.g., 0.3 for 30% off).
+If entry for PRODUCT + date exists: update count/price/discount.
 If count is 0 or empty: remove entry.
 Otherwise: insert new row."
-  (let ((date (or date (format-time-string "%Y-%m-%d")))
-        (count-num (if (and count (not (string-empty-p count)))
-                       (string-to-number count)
-                     1)))
+  (let* ((date (or date (format-time-string "%Y-%m-%d")))
+         (count-num (if (and count (not (string-empty-p count)))
+                        (string-to-number count)
+                      1))
+         (discount-rate (if (and discount (not (string-empty-p discount)))
+                            (string-to-number discount)
+                          0))
+         (price-num (if (and price (not (string-empty-p price)))
+                        (string-to-number price)
+                      0))
+         (dollars-saved (* price-num discount-rate count-num))
+         (formatted-discount (if (> discount-rate 0)
+                                 (format "$%.2f (%d%%)" dollars-saved (round (* 100 discount-rate)))
+                               "")))
     (with-current-buffer (find-file-noselect shop-file)
       (save-excursion
         (org-shop--ensure-history-table shop-file)
@@ -1095,7 +1156,8 @@ Otherwise: insert new row."
                 (goto-char (point-min))
                 (forward-line (1- existing-line))
                 (org-table-put nil 3 (number-to-string count-num))
-                (org-table-put nil 4 price)
+                (org-table-put nil 4 formatted-discount)
+                (org-table-put nil 5 price)
                 (org-table-align))
                ;; Entry exists and count = 0: remove it
                ((and existing-line (<= count-num 0))
@@ -1140,10 +1202,11 @@ Otherwise: insert new row."
                           (forward-line 1))))
                     (when insert-point
                       (goto-char insert-point)
-                      (insert (format "\n| %s | %s | %s | %s |"
+                      (insert (format "\n| %s | %s | %s | %s | %s |"
                                       product
                                       date
                                       count-num
+                                      formatted-discount
                                       price))
                       (org-table-align)))))
                ;; No entry and count = 0: do nothing
@@ -1158,10 +1221,11 @@ Otherwise: insert new row."
 
 (defun org-shop--recalculate-history-total ()
   "Recalculate TOTAL row in current history table.
-Calculates: unique days shopped, total item count, total price."
+Calculates: unique days shopped, total item count, total discount saved, total price."
   (when (org-at-table-p)
     (let ((dates (make-hash-table :test 'equal))
           (total-count 0)
+          (total-discount 0.0)
           (total-price 0.0)
           (total-line nil)
           (table-start (point)))
@@ -1172,7 +1236,8 @@ Calculates: unique days shopped, total item count, total price."
           (let ((product (string-trim (or (org-table-get nil 1) "")))
                 (date (string-trim (or (org-table-get nil 2) "")))
                 (count-str (string-trim (or (org-table-get nil 3) "")))
-                (price-str (string-trim (or (org-table-get nil 4) ""))))
+                (discount-str (string-trim (or (org-table-get nil 4) "")))
+                (price-str (string-trim (or (org-table-get nil 5) ""))))
             (if (string= product "TOTAL")
                 (setq total-line (org-table-current-line))
               ;; Data row (skip header by checking for valid date format)
@@ -1182,6 +1247,9 @@ Calculates: unique days shopped, total item count, total price."
                 ;; Sum counts
                 (unless (string-empty-p count-str)
                   (setq total-count (+ total-count (string-to-number count-str))))
+                ;; Sum discounts (parse $X.XX from "$X.XX (YY%)" format)
+                (when (and discount-str (string-match "\\$\\([0-9.]+\\)" discount-str))
+                  (setq total-discount (+ total-discount (string-to-number (match-string 1 discount-str)))))
                 ;; Sum prices (price * count)
                 (unless (string-empty-p price-str)
                   (let ((count (if (string-empty-p count-str) 1
@@ -1198,17 +1266,24 @@ Calculates: unique days shopped, total item count, total price."
               (org-table-goto-line total-line)
               (org-table-put nil 2 (number-to-string unique-days))
               (org-table-put nil 3 (number-to-string total-count))
-              (org-table-put nil 4 (format "%.2f" total-price)))
+              (org-table-put nil 4 (if (> total-discount 0)
+                                       (format "$%.2f" total-discount)
+                                     ""))
+              (org-table-put nil 5 (format "%.2f" total-price)))
           ;; Create TOTAL row at end of table
           (goto-char table-start)
           (while (and (org-at-table-p) (not (eobp)))
             (forward-line 1))
           (forward-line -1)
           (end-of-line)
-          (insert "\n|--------+------+-------+-------|")
-          (insert (format "\n| TOTAL | %d | %d | %.2f |"
-                          unique-days total-count total-price))
-          (insert "\n|--------+------+-------+-------|"))
+          (insert "\n|--------+------+-------+----------+-------|")
+          (insert (format "\n| TOTAL | %d | %d | %s | %.2f |"
+                          unique-days total-count
+                          (if (> total-discount 0)
+                              (format "$%.2f" total-discount)
+                            "")
+                          total-price))
+          (insert "\n|--------+------+-------+----------+-------|"))
         (org-table-align)))))
 
 ;;;###autoload
@@ -1226,10 +1301,10 @@ Shows: unique days shopped, total item count, total spent."
 ;;;###autoload
 (defun org-shop-sync ()
   "Sync shopping list back to shop file.
-For done items [X]: upserts purchase to history (product, date, count, price).
+For done items [X]: upserts purchase to history (product, date, count, discount, price).
 For not-done items [ ]: removes from history if previously synced.
 For items with new_price: updates price in shop file.
-For new products (not in shop): adds them to regular table.
+For new products (not in shop): adds them to inventory table.
 Re-syncing is safe - updates existing entries instead of creating duplicates."
   (interactive)
   (unless (org-shop--at-table-p)
@@ -1246,6 +1321,7 @@ Re-syncing is safe - updates existing entries instead of creating duplicates."
       (let ((done (cdr (assoc "done" row)))
             (product (cdr (assoc "product" row)))
             (count (cdr (assoc "count" row)))
+            (discount (cdr (assoc "discount" row)))
             (quantity (cdr (assoc "quantity" row)))
             (known-price (cdr (assoc "known_price" row)))
             (new-price (cdr (assoc "new_price" row)))
@@ -1264,10 +1340,10 @@ Re-syncing is safe - updates existing entries instead of creating duplicates."
             (if (and done (string-match-p "X" done))
                 ;; Done: upsert with count (or 1 if empty)
                 (progn
-                  (org-shop--upsert-history shop-file product count price date)
+                  (org-shop--upsert-history shop-file product count price date discount)
                   (cl-incf logged))
               ;; Not done: upsert with count=0 to remove from history
-              (org-shop--upsert-history shop-file product "0" price date)
+              (org-shop--upsert-history shop-file product "0" price date nil)
               (cl-incf removed))
             ;; Update price in shop file if we have an effective price
             ;; (updates even when new_price == known_price, since shop file might be empty)
