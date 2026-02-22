@@ -852,30 +852,118 @@ Only counts rows where new_price is filled. Returns with +/- prefix."
                           (setq diff (+ diff (- new known)))))))))
     (format "%s%.2f" (if (>= diff 0) "+" "") diff)))
 
+(defun org-shop--insert-empty-shopping-table ()
+  "Insert an empty shopping list table at point."
+  ;; Insert top hline
+  (insert "|------+------+-------+----------+----------+-------+-------------+-----------|\n")
+  ;; Insert header
+  (insert "| product | done | count | discount | quantity | notes | known_price | new_price |\n")
+  (insert "|------+------+-------+----------+----------+-------+-------------+-----------|\n")
+  ;; Insert separator before summary
+  (insert "|------+------+-------+----------+----------+-------+-------------+-----------|\n")
+  ;; Insert summary row
+  (insert "| Summary | 0U 0M |  |  |  | - | 0.00 | +0.00 |\n")
+  ;; Insert bottom hline
+  (insert "|------+------+-------+----------+----------+-------+-------------+-----------|\n")
+  ;; Align table
+  (org-table-align))
+
+(defun org-shop--ensure-shopping-heading ()
+  "Ensure we're under a ** Shopping heading. Create one if needed.
+Returns point at the Shopping heading."
+  (save-excursion
+    (let ((found nil))
+      ;; Check if we're already under a Shopping heading
+      (condition-case nil
+          (progn
+            (org-back-to-heading t)
+            (let ((heading (org-get-heading t t t t)))
+              (when (string-match-p "\\bShopping\\b" heading)
+                (setq found (point)))))
+        (error nil))
+      ;; Check parent headings
+      (unless found
+        (condition-case nil
+            (while (and (not found) (> (org-outline-level) 1))
+              (outline-up-heading 1 t)
+              (let ((heading (org-get-heading t t t t)))
+                (when (string-match-p "\\bShopping\\b" heading)
+                  (setq found (point)))))
+          (error nil)))
+      found)))
+
+(defun org-shop--find-or-create-shopping-heading ()
+  "Find or create a ** Shopping heading under * Capture.
+Returns point at the Shopping heading."
+  (let ((existing (org-shop--ensure-shopping-heading)))
+    (if existing
+        (goto-char existing)
+      ;; Find * Capture heading
+      (goto-char (point-min))
+      (if (re-search-forward "^\\* Capture" nil t)
+          (progn
+            ;; Go to end of Capture subtree
+            (org-end-of-subtree t)
+            ;; Insert new Shopping heading
+            (insert "\n\n** Shopping\n")
+            (forward-line -1)
+            (point))
+        (user-error "No * Capture heading found")))))
+
 ;;;###autoload
-(defun org-shop-generate ()
+(defun org-shop-generate (&optional empty)
   "Generate shopping list from marked items in shop file.
 Inserts table at point with marked products.
 If `org-shop-seasons-file' is set, inserts a seasonal produce heading
-as a sibling (same level), but only once per parent heading."
-  (interactive)
+as a sibling (same level), but only once per parent heading.
+
+With prefix arg EMPTY (or if no marked items), generates empty table structure
+under a ** Shopping heading (created if needed under * Capture)."
+  (interactive "P")
   (let* ((date (org-shop--page-date))
-         (shop-name (org-shop--resolve-shop))
+         (shop-name (or (org-shop--get-shop-from-heading)
+                        (org-shop--prompt-shop)))
          (shop-file (org-shop--find-shop-file shop-name))
-         (marked-rows (org-shop--get-marked-rows shop-file)))
-    (unless marked-rows
-      (user-error "No marked items found in %s" shop-name))
-    ;; Insert the table
-    (org-shop--insert-shopping-table marked-rows)
-    ;; Insert seasonal produce subheading if configured
-    (when org-shop-seasons-file
-      (org-shop--insert-seasonal-table date shop-file))
-    ;; Clear marks and update last_bought in shop file
-    (let ((products (mapcar (lambda (row) (cdr (assoc "product" row)))
-                            marked-rows)))
-      (org-shop--clear-marks-in-file shop-file products date))
-    (message "Generated shopping list with %d items from %s"
-             (length marked-rows) shop-name)))
+         (marked-rows (unless empty (org-shop--get-marked-rows shop-file))))
+    (if (or empty (not marked-rows))
+        ;; Empty table generation mode
+        (progn
+          ;; Ensure we're under a Shopping heading
+          (org-shop--find-or-create-shopping-heading)
+          (org-end-of-subtree t)
+          (insert "\n")
+          ;; Insert seasonal heading first if configured
+          (when org-shop-seasons-file
+            (let ((shop-file-for-seasonal shop-file))
+              ;; We need to be at a heading for org-shop--insert-seasonal-table
+              ;; Insert a temporary shop heading, let seasonal insert as sibling
+              (insert "\n*** placeholder\n")
+              (forward-line -1)
+              (org-shop--insert-seasonal-table date shop-file-for-seasonal)
+              ;; Remove placeholder
+              (save-excursion
+                (when (re-search-forward "^\\*\\*\\* placeholder$" nil t)
+                  (beginning-of-line)
+                  (delete-region (point) (1+ (line-end-position)))))))
+          ;; Insert shop heading with link
+          (let ((shop-id (org-shop--get-shop-file-id shop-file)))
+            (if shop-id
+                (insert (format "\n*** [[id:%s][%s]]\n\n" shop-id (capitalize shop-name)))
+              (insert (format "\n*** %s\n\n" (capitalize shop-name)))))
+          ;; Insert empty table
+          (org-shop--insert-empty-shopping-table)
+          (message "Generated empty shopping structure for %s" shop-name))
+      ;; Normal mode with marked items
+      (org-shop--insert-shopping-table marked-rows)
+      ;; Insert seasonal produce subheading if configured
+      (when org-shop-seasons-file
+        (org-shop--insert-seasonal-table date shop-file))
+      ;; Clear marks and update last_bought in shop file
+      (let ((products (mapcar (lambda (row) (cdr (assoc "product" row)))
+                              marked-rows)))
+        (org-shop--clear-marks-in-file shop-file products date))
+      (message "Generated shopping list with %d items from %s"
+               (length marked-rows) shop-name))))
 
 ;;; ============================================================================
 ;;; Core Functions - Price Sync
