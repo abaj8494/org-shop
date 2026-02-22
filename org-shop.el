@@ -910,6 +910,12 @@ Returns point at the Shopping heading."
             (point))
         (user-error "No * Capture heading found")))))
 
+(defun org-shop--at-shop-heading-p ()
+  "Return shop name if point is at a heading that matches a shop.
+Returns nil if not at a shop heading."
+  (when (org-at-heading-p)
+    (org-shop--get-shop-from-heading)))
+
 ;;;###autoload
 (defun org-shop-generate (&optional empty)
   "Generate shopping list from marked items in shop file.
@@ -918,38 +924,47 @@ If `org-shop-seasons-file' is set, inserts a seasonal produce heading
 as a sibling (same level), but only once per parent heading.
 
 With prefix arg EMPTY (or if no marked items), generates empty table structure
-under a ** Shopping heading (created if needed under * Capture)."
+under a ** Shopping heading (created if needed under * Capture).
+If already at a shop heading, linkifies it and inserts table below."
   (interactive "P")
-  (let* ((date (org-shop--page-date))
-         (shop-name (or (org-shop--get-shop-from-heading)
+  (let* ((at-shop-heading (org-shop--at-shop-heading-p))
+         (date (org-shop--page-date))
+         (shop-name (or at-shop-heading
+                        (org-shop--get-shop-from-heading)
                         (org-shop--prompt-shop)))
          (shop-file (org-shop--find-shop-file shop-name))
          (marked-rows (unless empty (org-shop--get-marked-rows shop-file))))
     (if (or empty (not marked-rows))
         ;; Empty table generation mode
         (progn
-          ;; Ensure we're under a Shopping heading
-          (org-shop--find-or-create-shopping-heading)
-          (org-end-of-subtree t)
-          (insert "\n")
-          ;; Insert seasonal heading first if configured
-          (when org-shop-seasons-file
-            (let ((shop-file-for-seasonal shop-file))
-              ;; We need to be at a heading for org-shop--insert-seasonal-table
-              ;; Insert a temporary shop heading, let seasonal insert as sibling
-              (insert "\n*** placeholder\n")
-              (forward-line -1)
-              (org-shop--insert-seasonal-table date shop-file-for-seasonal)
-              ;; Remove placeholder
-              (save-excursion
-                (when (re-search-forward "^\\*\\*\\* placeholder$" nil t)
-                  (beginning-of-line)
-                  (delete-region (point) (1+ (line-end-position)))))))
-          ;; Insert shop heading with link
-          (let ((shop-id (org-shop--get-shop-file-id shop-file)))
-            (if shop-id
-                (insert (format "\n*** [[id:%s][%s]]\n\n" shop-id (capitalize shop-name)))
-              (insert (format "\n*** %s\n\n" (capitalize shop-name)))))
+          (if at-shop-heading
+              ;; Already at a shop heading - linkify it and insert table below
+              (progn
+                (org-shop--linkify-shop-in-heading shop-name)
+                (org-end-of-subtree t)
+                (insert "\n\n"))
+            ;; Not at shop heading - create structure
+            (org-shop--find-or-create-shopping-heading)
+            (org-end-of-subtree t)
+            (insert "\n")
+            ;; Insert seasonal heading first if configured
+            (when org-shop-seasons-file
+              (let ((shop-file-for-seasonal shop-file))
+                ;; We need to be at a heading for org-shop--insert-seasonal-table
+                ;; Insert a temporary shop heading, let seasonal insert as sibling
+                (insert "\n*** placeholder\n")
+                (forward-line -1)
+                (org-shop--insert-seasonal-table date shop-file-for-seasonal)
+                ;; Remove placeholder
+                (save-excursion
+                  (when (re-search-forward "^\\*\\*\\* placeholder$" nil t)
+                    (beginning-of-line)
+                    (delete-region (point) (1+ (line-end-position)))))))
+            ;; Insert shop heading with link
+            (let ((shop-id (org-shop--get-shop-file-id shop-file)))
+              (if shop-id
+                  (insert (format "\n*** [[id:%s][%s]]\n\n" shop-id (capitalize shop-name)))
+                (insert (format "\n*** %s\n\n" (capitalize shop-name))))))
           ;; Insert empty table
           (org-shop--insert-empty-shopping-table)
           (message "Generated empty shopping structure for %s" shop-name))
