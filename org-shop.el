@@ -812,7 +812,7 @@ Discount is a decimal (e.g., 0.1 for 10%)."
                                  (not (string-empty-p price-str)))
                         (let ((disc (string-to-number disc-str))
                               (price (string-to-number price-str)))
-                          (setq total (+ total (* disc price)))))))))
+                          (setq total (+ total (org-shop--round-price (* disc price))))))))))
     (if (zerop total) "" (format "%.2f" total))))
 
 (defun org-shop--summary-known-price (_col)
@@ -849,7 +849,7 @@ Only counts rows where new_price is filled. Returns with +/- prefix."
                         (let ((known (if (string-empty-p known-str) 0
                                        (string-to-number known-str)))
                               (new (string-to-number new-str)))
-                          (setq diff (+ diff (- new known)))))))))
+                          (setq diff (+ diff (org-shop--round-price (- new known))))))))))
     (format "%s%.2f" (if (>= diff 0) "+" "") diff)))
 
 (defun org-shop--insert-empty-shopping-table ()
@@ -1252,7 +1252,7 @@ Otherwise: insert new row."
          (price-num (if (and price (not (string-empty-p price)))
                         (string-to-number price)
                       0))
-         (dollars-saved (* price-num discount-rate count-num))
+         (dollars-saved (org-shop--round-price (* price-num discount-rate count-num)))
          (formatted-discount (if (> discount-rate 0)
                                  (format "$%.2f (%d%%)" dollars-saved (round (* 100 discount-rate)))
                                "")))
@@ -1372,12 +1372,13 @@ Calculates: unique days shopped, total item count, total discount saved, total p
                 ;; Sum discounts (parse $X.XX from "$X.XX (YY%)" format)
                 (when (and discount-str (string-match "\\$\\([0-9.]+\\)" discount-str))
                   (setq total-discount (+ total-discount (string-to-number (match-string 1 discount-str)))))
-                ;; Sum prices (price * count)
+                ;; Sum prices (price * count), rounded per item
                 (unless (string-empty-p price-str)
                   (let ((count (if (string-empty-p count-str) 1
                                  (string-to-number count-str)))
                         (price (string-to-number price-str)))
-                    (setq total-price (+ total-price (* count price)))))))))
+                    (setq total-price (+ total-price
+                                         (org-shop--round-price (* count price))))))))))
         (forward-line 1))
       ;; Calculate unique days
       (let ((unique-days (hash-table-count dates)))
@@ -1490,6 +1491,11 @@ Re-syncing is safe - updates existing entries instead of creating duplicates."
 ;;; Keymap Setup
 ;;; ============================================================================
 
+(defun org-shop--round-price (val)
+  "Round VAL to 2 decimal places (nearest cent).
+This matches how physical receipts round each line item individually."
+  (/ (fround (* val 100.0)) 100.0))
+
 (defun org-shop--parse-price (str)
   "Parse STR as a price value. Returns 0.0 for empty, \"-\", or non-numeric."
   (if (or (null str) (string-empty-p str) (string= str "-"))
@@ -1548,18 +1554,22 @@ Formats all price cells to 2 decimal places."
                   ;; new_price = receipt price (discount already factored in)
                   ;; known_price items: apply discount rate
                   (let* ((has-new (not (zerop new-val)))
-                         (item-cost (if has-new
-                                        (* count new-val)
-                                      (* count known-val (- 1.0 disc-rate))))
-                         (item-saved (if has-new 0.0
-                                       (* count known-val disc-rate))))
+                         ;; Round per item to match physical receipt rounding
+                         (item-cost (org-shop--round-price
+                                     (if has-new
+                                         (* count new-val)
+                                       (* count known-val (- 1.0 disc-rate)))))
+                         (item-saved (org-shop--round-price
+                                      (if has-new 0.0
+                                        (* count known-val disc-rate)))))
                     (setq total-paid (+ total-paid item-cost))
                     ;; Dollars saved from discounts
                     (setq total-discount (+ total-discount item-saved))
                     ;; price_diff = Σ ((new - known) × count) for items with new_price
                     (when has-new
                       (setq total-diff (+ total-diff
-                                          (* count (- new-val known-val))))))))))))
+                                          (org-shop--round-price
+                                           (* count (- new-val known-val)))))))))))))
       ;; Update summary row
       (when summary-line
         (org-table-goto-line summary-line)
