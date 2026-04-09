@@ -129,6 +129,13 @@ If nil, seasonal table appears for all shops."
                  (string :tag "Required filetag"))
   :group 'org-shop)
 
+(defcustom org-shop-next-shop-heading "next shop"
+  "Heading name for ad-hoc shopping items in shop files.
+Items under this heading are plain checklist entries (- [ ] item)
+that get copied into the generated shopping list."
+  :type 'string
+  :group 'org-shop)
+
 (defcustom org-shop-complete-auto-fill t
   "If non-nil, auto-fill price/quantity/notes when selecting a product."
   :type 'boolean
@@ -697,6 +704,55 @@ Returns list of alists with product data."
                     (string-match-p (regexp-quote org-shop--mark-char) next-val))))
            rows))))))
 
+(defun org-shop--get-next-shop-items (shop-file)
+  "Get checklist items from the `next shop' heading in SHOP-FILE.
+Returns a list of item strings, or nil if heading is missing or empty."
+  (when (and shop-file (file-exists-p shop-file))
+    (with-current-buffer (find-file-noselect shop-file)
+      (save-excursion
+        (goto-char (point-min))
+        (let ((items nil)
+              (heading-re (concat "^\\*+\\s-+"
+                                  (regexp-quote org-shop-next-shop-heading)
+                                  "\\s-*$")))
+          (when (re-search-forward heading-re nil t)
+            (forward-line 1)
+            (let ((bound (save-excursion
+                           (if (re-search-forward "^\\*" nil t)
+                               (line-beginning-position)
+                             (point-max)))))
+              (while (re-search-forward
+                      "^\\s-*- \\[\\( \\|\\)\\] \\(.+\\)$" bound t)
+                (push (string-trim (match-string 2)) items)))
+            (nreverse items)))))))
+
+(defun org-shop--insert-next-shop-items (items)
+  "Insert ITEMS as a checklist under a plain text block."
+  (when items
+    (insert "\n")
+    (dolist (item items)
+      (insert (format "- [ ] %s\n" item)))))
+
+(defun org-shop--clear-next-shop-in-file (shop-file)
+  "Clear all items under the `next shop' heading in SHOP-FILE."
+  (with-current-buffer (find-file-noselect shop-file)
+    (save-excursion
+      (goto-char (point-min))
+      (let ((heading-re (concat "^\\*+\\s-+"
+                                (regexp-quote org-shop-next-shop-heading)
+                                "\\s-*$")))
+        (when (re-search-forward heading-re nil t)
+          (forward-line 1)
+          (let ((start (point))
+                (end (save-excursion
+                       (if (re-search-forward "^\\*" nil t)
+                           (line-beginning-position)
+                         (point-max)))))
+            ;; Delete content between heading and next heading, leave a blank line
+            (delete-region start end)
+            (insert "\n")))))
+    (save-buffer)))
+
 (defun org-shop--clear-marks-in-file (shop-file products &optional date)
   "Clear marks for PRODUCTS in SHOP-FILE and update last_bought.
 DATE defaults to the page date of the calling buffer."
@@ -933,7 +989,8 @@ If already at a shop heading, linkifies it and inserts table below."
                         (org-shop--get-shop-from-heading)
                         (org-shop--prompt-shop)))
          (shop-file (org-shop--find-shop-file shop-name))
-         (marked-rows (unless empty (org-shop--get-marked-rows shop-file))))
+         (marked-rows (unless empty (org-shop--get-marked-rows shop-file)))
+         (next-shop-items (org-shop--get-next-shop-items shop-file)))
     (if (or empty (not marked-rows))
         ;; Empty table generation mode
         (progn
@@ -967,9 +1024,17 @@ If already at a shop heading, linkifies it and inserts table below."
                 (insert (format "\n*** %s\n\n" (capitalize shop-name))))))
           ;; Insert empty table
           (org-shop--insert-empty-shopping-table)
+          ;; Insert next shop items if any
+          (when next-shop-items
+            (org-shop--insert-next-shop-items next-shop-items)
+            (org-shop--clear-next-shop-in-file shop-file))
           (message "Generated empty shopping structure for %s" shop-name))
       ;; Normal mode with marked items
       (org-shop--insert-shopping-table marked-rows)
+      ;; Insert next shop items if any
+      (when next-shop-items
+        (org-shop--insert-next-shop-items next-shop-items)
+        (org-shop--clear-next-shop-in-file shop-file))
       ;; Insert seasonal produce subheading if configured
       (when org-shop-seasons-file
         (org-shop--insert-seasonal-table date shop-file))
