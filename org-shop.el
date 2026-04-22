@@ -1568,6 +1568,7 @@ This matches how physical receipts round each line item individually."
     (let ((n (string-to-number str)))
       (if (zerop n) 0.0 (float n)))))
 
+;;;###autoload
 (defun org-shop-recalculate ()
   "Recalculate the summary row in current shopping list table.
 Summary known_price = total paid (effective_price * count - discounts).
@@ -1644,6 +1645,36 @@ Formats all price cells to 2 decimal places."
         (org-shop--set-cell "known_price" (format "%.2f" total-paid))
         (org-shop--set-cell "new_price" (format "%s%.2f" (if (>= total-diff 0) "+" "") total-diff))
         (org-table-align)))))
+
+;;;###autoload
+(defun org-shop-recalculate-buffer ()
+  "Recalculate the Summary row of every shop table in the current buffer.
+Identifies shop tables by the presence of both `done' and `known_price'
+columns in the header. Useful after pasting several staged receipt
+blocks under different `*** [[id:...][Shop]]' headings in a daily file."
+  (interactive)
+  (let ((count 0)
+        (errors 0))
+    (save-excursion
+      (goto-char (point-min))
+      (while (re-search-forward "^[ \t]*|" nil t)
+        (when (org-at-table-p)
+          (save-excursion
+            (when (and (ignore-errors (org-table-goto-line 1) t)
+                       (org-shop--has-column-p "done")
+                       (org-shop--has-column-p "known_price"))
+              (condition-case err
+                  (progn (org-shop-recalculate) (cl-incf count))
+                (error
+                 (cl-incf errors)
+                 (message "org-shop-recalculate-buffer: skipped table at line %d (%s)"
+                          (line-number-at-pos)
+                          (error-message-string err))))))
+          (goto-char (org-table-end)))))
+    (message "org-shop: recalculated %d shop table%s%s"
+             count
+             (if (= count 1) "" "s")
+             (if (zerop errors) "" (format " (%d skipped)" errors)))))
 
 ;;; ============================================================================
 ;;; Product Completion Functions
@@ -1949,6 +1980,8 @@ from the shop's regular table entirely."
     (define-key map (kbd "m") #'org-shop-mark)
     (define-key map (kbd "g") #'org-shop-generate)
     (define-key map (kbd "s") #'org-shop-sync)
+    (define-key map (kbd "r") #'org-shop-recalculate)
+    (define-key map (kbd "R") #'org-shop-recalculate-buffer)
     (define-key map (kbd "c") #'org-shop-clear-marks)
     (define-key map (kbd "t") #'org-shop-complete-mode)
     (define-key map (kbd "a") #'org-shop-add-item)
@@ -1964,6 +1997,8 @@ Binds commands under `org-shop-keymap-prefix' (default C-c S):
   <prefix> m - Toggle mark (next in shop, done in daily)
   <prefix> g - Generate shopping list
   <prefix> s - Sync to shop (also recalculates summary)
+  <prefix> r - Recalculate Summary row of table at point
+  <prefix> R - Recalculate Summary in every shop table in buffer
   <prefix> c - Clear all marks
   <prefix> t - Toggle product completion mode
   <prefix> a - Add item via minibuffer prompts
