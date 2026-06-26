@@ -473,4 +473,117 @@ Total = 9.55"
                       (setq total-price (string-trim (or (org-table-get nil 5) "")))))
         (should (string= total-price "9.55"))))))
 
+;;; ============================================================================
+;;; Separator-flexible matching tests
+;;; ============================================================================
+
+(ert-deftest test-flexible-regexp-separators ()
+  "-, _ and space are interchangeable when matching shop names."
+  (should (string-match-p (org-shop--flexible-regexp "dan_murphy") "dan murphy's"))
+  (should (string-match-p (org-shop--flexible-regexp "dan_murphy") "dan-murphy"))
+  (should (string-match-p (org-shop--flexible-regexp "dan_murphy") "dan_murphy"))
+  (should (string-match-p (org-shop--flexible-regexp "no-gap-dental") "no gap dental"))
+  ;; A single-word shop name is unaffected.
+  (should (string-match-p (org-shop--flexible-regexp "aldi") "aldi run"))
+  (should-not (string-match-p (org-shop--flexible-regexp "aldi") "coles")))
+
+(ert-deftest test-shop-from-heading-separator-match ()
+  "A `dan_murphy.org' file matches a `Dan Murphy's Run' heading."
+  (let ((dir (make-temp-file "org-shop-shops" t)))
+    (unwind-protect
+        (progn
+          (write-region "#+TITLE: dan murphy's\n" nil
+                        (expand-file-name "dan_murphy.org" dir))
+          (write-region "#+TITLE: aldi\n" nil
+                        (expand-file-name "aldi.org" dir))
+          (let ((org-shop-directory dir))
+            (with-org-shop-temp-buffer "* Dan Murphy's Run\n"
+              (should (string= (org-shop--get-shop-from-heading) "dan_murphy")))
+            (with-org-shop-temp-buffer "* Aldi Trip\n"
+              (should (string= (org-shop--get-shop-from-heading) "aldi")))))
+      (delete-directory dir t))))
+
+;;; ============================================================================
+;;; next shop checklist tests
+;;; ============================================================================
+
+(defun test-org-shop--with-temp-shop-file (contents fn)
+  "Write CONTENTS to a temp .org file and call FN with its path."
+  (let ((file (make-temp-file "org-shop-next" nil ".org" contents)))
+    (unwind-protect
+        (funcall fn file)
+      (when (get-file-buffer file)
+        (with-current-buffer (get-file-buffer file)
+          (set-buffer-modified-p nil))
+        (kill-buffer (get-file-buffer file)))
+      (delete-file file))))
+
+(ert-deftest test-next-shop-items-preserve-nesting ()
+  "Nested sub-items and non-blank checkbox states are copied verbatim."
+  (test-org-shop--with-temp-shop-file
+   "#+TITLE: bunnings
+
+* next shop
+
+- [ ] eyelets
+- [ ] extension chords
+  - outside, shortish, 2m
+  - inside, 1m, 2m, 3m
+- [-] power board 5 plugs
+  - [ ] splitters maybe 3 to 5
+  - [X] permanent markers.
+
+* inventory
+| next | product |
+"
+   (lambda (file)
+     (should
+      (equal (org-shop--get-next-shop-items file)
+             '("- [ ] eyelets"
+               "- [ ] extension chords"
+               "  - outside, shortish, 2m"
+               "  - inside, 1m, 2m, 3m"
+               "- [-] power board 5 plugs"
+               "  - [ ] splitters maybe 3 to 5"
+               "  - [X] permanent markers."))))))
+
+(ert-deftest test-next-shop-heading-hyphen-tolerant ()
+  "A `* next-shop' heading is matched by the default `next shop' config."
+  (test-org-shop--with-temp-shop-file
+   "#+TITLE: dan murphy's
+
+* next-shop
+
+- [ ] jägermeister
+
+* inventory
+| next | product |
+"
+   (lambda (file)
+     (should (equal (org-shop--get-next-shop-items file)
+                    '("- [ ] jägermeister"))))))
+
+(ert-deftest test-next-shop-items-empty ()
+  "An empty next shop heading yields nil."
+  (test-org-shop--with-temp-shop-file
+   "#+TITLE: bunnings
+
+* next shop
+
+* inventory
+| next | product |
+"
+   (lambda (file)
+     (should (null (org-shop--get-next-shop-items file))))))
+
+(ert-deftest test-insert-next-shop-items-verbatim ()
+  "Items are inserted verbatim, preserving nesting and checkbox state."
+  (with-temp-buffer
+    (org-shop--insert-next-shop-items
+     '("- [ ] eyelets"
+       "  - outside, shortish, 2m"
+       "- [X] permanent markers."))
+    (should (string= (buffer-string)
+                     "\n- [ ] eyelets\n  - outside, shortish, 2m\n- [X] permanent markers.\n"))))
+
 ;;; test-org-shop.el ends here

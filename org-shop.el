@@ -228,6 +228,12 @@ Falls back to today's date."
       (when (re-search-forward "^:ROAM_ALIASES:\\s-*\\(.+\\)$" nil t)
         (split-string (string-trim (match-string 1)) "\\s-+" t)))))
 
+(defun org-shop--flexible-regexp (term)
+  "Return a regexp matching TERM with `-', `_' and space treated alike.
+Any run of separators in TERM matches any run of separators in the target,
+so \"dan_murphy\" matches \"dan murphy\" and \"dan-murphy\"."
+  (replace-regexp-in-string "[-_ ]+" "[-_ ]+" (regexp-quote term)))
+
 (defun org-shop--get-shop-from-heading ()
   "Extract shop name from current heading.
 E.g., `** TODO Aldi Run' -> \"aldi\", `** Woolworths Trip' -> \"woolworths\".
@@ -243,17 +249,21 @@ Also checks ROAM_ALIASES in shop files (e.g., \"woolies\" -> \"woolworths\")."
                             "" normalized))
                (normalized (string-trim normalized))
                (shops (org-shop--list-shops)))
-          ;; First try to match by shop name directly
+          ;; First try to match by shop name directly.  Treat -, _ and
+          ;; space as interchangeable so file names like "dan_murphy"
+          ;; match headings like "Dan Murphy's".
           (or (cl-find-if (lambda (shop)
-                            (string-match-p (regexp-quote shop) normalized))
+                            (string-match-p (org-shop--flexible-regexp shop)
+                                            normalized))
                           shops)
               ;; Then try to match by ROAM_ALIASES
               (cl-find-if (lambda (shop)
                             (let* ((shop-file (org-shop--find-shop-file shop))
                                    (aliases (org-shop--get-shop-aliases shop-file)))
                               (cl-some (lambda (alias)
-                                         (string-match-p (regexp-quote (downcase alias))
-                                                         normalized))
+                                         (string-match-p
+                                          (org-shop--flexible-regexp (downcase alias))
+                                          normalized))
                                        aliases)))
                           shops)))))))
 
@@ -278,7 +288,7 @@ Also matches ROAM_ALIASES (e.g., \"Woolies\" -> link to woolworths)."
                   (case-fold-search t))  ; Case-insensitive matching
               ;; Find and replace the first matching term
               (cl-loop for term in search-terms
-                       when (string-match (regexp-quote term) heading-text)
+                       when (string-match (org-shop--flexible-regexp term) heading-text)
                        do (let* ((match-start (+ heading-start (match-beginning 0)))
                                  (match-end (+ heading-start (match-end 0)))
                                  (original-text (buffer-substring match-start match-end))
@@ -704,43 +714,56 @@ Returns list of alists with product data."
                     (string-match-p (regexp-quote org-shop--mark-char) next-val))))
            rows))))))
 
+(defun org-shop--next-shop-heading-regexp ()
+  "Regexp matching the `next shop' heading.
+Treats -, _ and space as interchangeable so a configured heading of
+\"next shop\" also matches \"* next-shop\"."
+  (concat "^\\*+\\s-+"
+          (org-shop--flexible-regexp org-shop-next-shop-heading)
+          "\\s-*$"))
+
+(defun org-shop--trim-blank-lines (lines)
+  "Drop leading and trailing blank (whitespace-only) lines from LINES."
+  (let ((blank-p (lambda (l) (string-match-p "\\`\\s-*\\'" l))))
+    (while (and lines (funcall blank-p (car lines)))
+      (setq lines (cdr lines)))
+    (setq lines (nreverse lines))
+    (while (and lines (funcall blank-p (car lines)))
+      (setq lines (cdr lines)))
+    (nreverse lines)))
+
 (defun org-shop--get-next-shop-items (shop-file)
-  "Get checklist items from the `next shop' heading in SHOP-FILE.
-Returns a list of item strings, or nil if heading is missing or empty."
+  "Get the checklist lines under the `next shop' heading in SHOP-FILE.
+Returns the raw lines verbatim, preserving indentation, checkbox state and
+nested sub-items, or nil if the heading is missing or empty."
   (when (and shop-file (file-exists-p shop-file))
     (with-current-buffer (find-file-noselect shop-file)
       (save-excursion
         (goto-char (point-min))
-        (let ((items nil)
-              (heading-re (concat "^\\*+\\s-+"
-                                  (regexp-quote org-shop-next-shop-heading)
-                                  "\\s-*$")))
-          (when (re-search-forward heading-re nil t)
-            (forward-line 1)
-            (let ((bound (save-excursion
-                           (if (re-search-forward "^\\*" nil t)
-                               (line-beginning-position)
-                             (point-max)))))
-              (while (re-search-forward
-                      "^\\s-*- \\[\\( \\|\\)\\] \\(.+\\)$" bound t)
-                (push (string-trim (match-string 2)) items)))
-            (nreverse items)))))))
+        (when (re-search-forward (org-shop--next-shop-heading-regexp) nil t)
+          (forward-line 1)
+          (let* ((start (point))
+                 (end (save-excursion
+                        (if (re-search-forward "^\\*" nil t)
+                            (line-beginning-position)
+                          (point-max))))
+                 (lines (split-string
+                         (buffer-substring-no-properties start end) "\n")))
+            (org-shop--trim-blank-lines lines)))))))
 
 (defun org-shop--insert-next-shop-items (items)
-  "Insert ITEMS as a checklist under a plain text block."
+  "Insert ITEMS (verbatim checklist lines) under a plain text block."
   (when items
     (insert "\n")
     (dolist (item items)
-      (insert (format "- [ ] %s\n" item)))))
+      (insert item "\n"))))
 
 (defun org-shop--clear-next-shop-in-file (shop-file)
   "Clear all items under the `next shop' heading in SHOP-FILE."
   (with-current-buffer (find-file-noselect shop-file)
     (save-excursion
       (goto-char (point-min))
-      (let ((heading-re (concat "^\\*+\\s-+"
-                                (regexp-quote org-shop-next-shop-heading)
-                                "\\s-*$")))
+      (let ((heading-re (org-shop--next-shop-heading-regexp)))
         (when (re-search-forward heading-re nil t)
           (forward-line 1)
           (let ((start (point))
