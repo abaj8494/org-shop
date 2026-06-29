@@ -617,4 +617,42 @@ Total = 9.55"
     (org-table-goto-line 1)
     (should (= (length (org-shop--table-data-lines)) 1))))
 
+;;; ============================================================================
+;;; Regression: a final table row without a trailing newline must not hang
+;;; ============================================================================
+;; A shop table rendered as the last line of a buffer (e.g. inside a notmuch
+;; message) has no newline after its final row.  Enumeration used to spin
+;; forever there: `forward-line' could not advance past the row, yet
+;; `org-at-table-p' stayed non-nil.  These tests assert termination *and*
+;; correctness -- a regression of the guard never returns, surfacing as a hung
+;; (failed) suite rather than a wrong assertion.
+
+(ert-deftest test-table-data-lines-eob-no-trailing-newline ()
+  "Enumeration terminates when the last row has no trailing newline."
+  (with-temp-buffer
+    (org-mode)
+    (insert "| product | done | known_price |\n")
+    (insert "|---------+------+-------------|\n")
+    (insert "| Milk    | [X]  | 2.50        |\n")
+    (insert "|---------+------+-------------|\n")
+    (insert "| Summary |      |             |") ; no trailing newline
+    (org-table-goto-line 1)
+    ;; Milk + Summary
+    (should (= (length (org-shop--table-data-lines)) 2))))
+
+(ert-deftest test-recalculate-eob-no-trailing-newline ()
+  "`org-shop-recalculate' completes and totals correctly on such a table."
+  (with-temp-buffer
+    (org-mode)
+    (insert "| product | done | count | discount | known_price | new_price |\n")
+    (insert "|---------+------+-------+----------+-------------+-----------|\n")
+    (insert "| Milk    | [X]  | 1     |          | -           | 2.50      |\n")
+    (insert "| Eggs    | [X]  | 1     |          | -           | 4.00      |\n")
+    (insert "|---------+------+-------+----------+-------------+-----------|\n")
+    (insert "| Summary |      |       |          |             |           |") ; no newline
+    (org-table-goto-line 1)
+    (org-shop-recalculate)
+    (should (string= (test-org-shop--get-summary-cell "known_price") "6.50"))
+    (should (string= (test-org-shop--get-summary-cell "done") "0U 2M"))))
+
 ;;; test-org-shop.el ends here
