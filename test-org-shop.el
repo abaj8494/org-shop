@@ -586,4 +586,35 @@ Total = 9.55"
     (should (string= (buffer-string)
                      "\n- [ ] eyelets\n  - outside, shortish, 2m\n- [X] permanent markers.\n"))))
 
+;;; ============================================================================
+;;; Table row enumeration (org-shop--table-data-lines)
+;;; ============================================================================
+
+(ert-deftest test-table-data-lines-enumerates-data-rows ()
+  "Header and hlines are excluded; every data row (incl. Summary) is listed once."
+  (with-org-shop-temp-buffer
+      "| product | done |
+|---------+------|
+| A       | [ ]  |
+| B       | [ ]  |
+|---------+------|
+| Summary |      |
+"
+    (org-table-goto-line 1)
+    (let ((lines (org-shop--table-data-lines)))
+      ;; A, B and Summary -> three rows
+      (should (= (length lines) 3))
+      ;; each line number is reported exactly once
+      (should (equal lines (delete-dups (copy-sequence lines)))))))
+
+(ert-deftest test-table-data-lines-single-row ()
+  "A table with a single data row enumerates exactly that row."
+  (with-org-shop-temp-buffer
+      "| product | done |
+|---------+------|
+| Only    | [ ]  |
+"
+    (org-table-goto-line 1)
+    (should (= (length (org-shop--table-data-lines)) 1))))
+
 ;;; test-org-shop.el ends here
