@@ -358,13 +358,21 @@ Returns list of column names."
   "Return list of line numbers containing table data (excluding header/hline)."
   (save-excursion
     (let ((lines '())
-          (line 2))  ; Start after header
+          (line 2)        ; Start after header
+          (continue t))
       (org-table-goto-line line)
-      (while (org-at-table-p)
+      (while (and continue (org-at-table-p))
         (unless (org-at-table-hline-p)
           (push line lines))
         (setq line (1+ line))
-        (forward-line 1))
+        (let ((before (point)))
+          (forward-line 1)
+          ;; Stop when `forward-line' cannot advance: a table whose last row
+          ;; has no trailing newline (e.g. rendered at the end of a notmuch
+          ;; message buffer) leaves point on the same row, so `org-at-table-p'
+          ;; would stay non-nil and the loop would spin forever.
+          (when (or (eobp) (= (point) before))
+            (setq continue nil))))
       (nreverse lines))))
 
 (defun org-shop--parse-table ()
