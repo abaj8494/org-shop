@@ -1484,7 +1484,7 @@ Calculates: unique days shopped, total item count, total discount saved, total p
             (progn
               (org-table-goto-line total-line)
               (org-table-put nil 2 (number-to-string unique-days))
-              (org-table-put nil 3 (number-to-string total-count))
+              (org-table-put nil 3 (org-shop--format-count total-count))
               (org-table-put nil 4 (if (> total-discount 0)
                                        (format "$%.2f" total-discount)
                                      ""))
@@ -1587,6 +1587,14 @@ Re-syncing is safe - updates existing entries instead of creating duplicates."
 ;;; Keymap Setup
 ;;; ============================================================================
 
+(defun org-shop--format-count (n)
+  "Format a summed count N for a table cell: integers as-is, fractional
+sums (per-kg rows: 0.61 + 0.51 + 2) rounded to 3 places with trailing zeros
+trimmed, so the cell never reads 3.1199999999999997."
+  (if (integerp n)
+      (number-to-string n)
+    (string-trim-right (format "%.3f" n) "\\.?0+")))
+
 (defun org-shop--round-price (val)
   "Round VAL to 2 decimal places (nearest cent).
 This matches how physical receipts round each line item individually."
@@ -1671,7 +1679,7 @@ Formats all price cells to 2 decimal places."
       (when summary-line
         (org-table-goto-line summary-line)
         (org-shop--set-cell "done" (format "%dU %dM" unmarked marked))
-        (org-shop--set-cell "count" (if (zerop total-count) "" (number-to-string total-count)))
+        (org-shop--set-cell "count" (if (zerop total-count) "" (org-shop--format-count total-count)))
         (org-shop--set-cell "discount" (if (zerop total-discount) "" (format "%.2f" total-discount)))
         (org-shop--set-cell "known_price" (format "%.2f" total-paid))
         (org-shop--set-cell "new_price" (format "%s%.2f" (if (>= total-diff 0) "+" "") total-diff))
