@@ -656,3 +656,153 @@ Total = 9.55"
     (should (string= (test-org-shop--get-summary-cell "done") "0U 2M"))))
 
 ;;; test-org-shop.el ends here
+
+;;; ============================================================================
+;;; sync: rebate rows, same-name rows, last_bought (2026-10-12 audit)
+;;; ============================================================================
+
+(defconst test-org-shop--costco-file
+  "#+TITLE: costco
+
+* next shop
+
+* inventory
+
+| next | product         | price | quantity | notes | last_bought |
+|------+-----------------+-------+----------+-------+-------------|
+| [ ]  | Scoop Away Plus | 39.99 | 19kg     |       |  2026-05-13 |
+| [ ]  | Whole Chicken   | 12.90 |          |       |  2026-05-05 |
+
+* history                                                        :noexport:
+|---------+------+-------+----------+-------|
+| product | date | count | discount | price |
+|---------+------+-------+----------+-------|
+"
+  "A minimal shop file in the post-audit shape.")
+
+(defconst test-org-shop--costco-daily
+  "* Costco
+
+| product                | done | count | discount | quantity | notes | known_price | new_price |
+|------------------------+------+-------+----------+----------+-------+-------------+-----------|
+| Scoop Away Plus        | [X]  |     2 |          | 19kg     |       |       39.99 |           |
+| Scoop Away Plus rebate | [X]  |     2 | rebate   |          |       |           - |     -8.00 |
+| Whole Chicken          | [X]  |     1 |          |          |       |       12.90 |     12.13 |
+| Whole Chicken          | [X]  |     1 |          |          |       |       12.90 |     12.02 |
+| Barramundi Fillet      | [X]  |     1 |          |          |       |           - |     37.94 |
+|------------------------+------+-------+----------+----------+-------+-------------+-----------|
+| Summary                | 0U 0M |      |          |          | -     |        0.00 |     +0.00 |
+|------------------------+------+-------+----------+----------+-------+-------------+-----------|
+"
+  "A daily table exercising rebate rows, duplicate names and last_bought.")
+
+(defun test-org-shop--with-shop-dir (fn)
+  "Create a temp `org-shop-directory' holding costco.org and call FN with its path."
+  (let* ((dir (make-temp-file "org-shop-dir" t))
+         (shop-file (expand-file-name "costco.org" dir)))
+    (with-temp-file shop-file (insert test-org-shop--costco-file))
+    (unwind-protect
+        (let ((org-shop-directory dir)
+              (org-shop-file-suffix ".org"))
+          (funcall fn shop-file))
+      (when (get-file-buffer shop-file)
+        (with-current-buffer (get-file-buffer shop-file)
+          (set-buffer-modified-p nil))
+        (kill-buffer (get-file-buffer shop-file)))
+      (delete-directory dir t))))
+
+(defun test-org-shop--sync-daily (date)
+  "Run `org-shop-sync' on the test daily, pretending its file is named DATE.org."
+  (with-temp-buffer
+    (org-mode)
+    (insert test-org-shop--costco-daily)
+    (setq buffer-file-name (concat "/nonexistent/" date ".org"))
+    (goto-char (point-min))
+    (re-search-forward "^|")
+    (unwind-protect
+        (org-shop-sync)
+      (set-buffer-modified-p nil)
+      (setq buffer-file-name nil))))
+
+(defun test-org-shop--shop-history (shop-file)
+  "Return the history rows of SHOP-FILE as (product date count discount price)."
+  (with-current-buffer (find-file-noselect shop-file)
+    (save-excursion
+      (org-shop--goto-table-after-heading org-shop-history-heading)
+      (let ((rows '()))
+        (forward-line 2)
+        (while (org-at-table-p)
+          (unless (or (org-at-table-hline-p)
+                      (string= (string-trim (or (org-table-get nil 1) "")) "TOTAL"))
+            (push (mapcar (lambda (i) (string-trim (or (org-table-get nil i) "")))
+                          '(1 2 3 4 5))
+                  rows))
+          (forward-line 1))
+        (nreverse rows)))))
+
+(defun test-org-shop--inventory-row (shop-file product)
+  "Return PRODUCT's inventory row of SHOP-FILE as (product price quantity last_bought), or nil."
+  (with-current-buffer (find-file-noselect shop-file)
+    (save-excursion
+      (org-shop--goto-table-after-heading org-shop-source-heading)
+      (cl-loop for line in (org-shop--table-data-lines)
+               do (org-table-goto-line line)
+               when (string-equal-ignore-case (org-shop--get-cell "product") product)
+               return (list (org-shop--get-cell "product")
+                            (org-shop--get-cell "price")
+                            (org-shop--get-cell "quantity")
+                            (org-shop--get-cell "last_bought"))))))
+
+(ert-deftest test-rebate-row-p ()
+  (should (org-shop--rebate-row-p "-8.00" nil))
+  (should (org-shop--rebate-row-p "-8.00" ""))
+  (should (org-shop--rebate-row-p "39.99" "rebate"))
+  (should (org-shop--rebate-row-p "39.99" " Rebate "))
+  (should-not (org-shop--rebate-row-p "39.99" ""))
+  (should-not (org-shop--rebate-row-p "39.99" "0.3"))
+  (should-not (org-shop--rebate-row-p "" nil)))
+
+(ert-deftest test-sync-rebate-rows-stay-out-of-inventory ()
+  "A `<Product> rebate' row is logged to history but never becomes a product."
+  (test-org-shop--with-shop-dir
+   (lambda (shop-file)
+     (test-org-shop--sync-daily "2026-05-14")
+     (should-not (test-org-shop--inventory-row shop-file "Scoop Away Plus rebate"))
+     (let ((rebate (cl-find "Scoop Away Plus rebate" (test-org-shop--shop-history shop-file)
+                            :key #'car :test #'string=)))
+       (should rebate)
+       (should (equal (nth 2 rebate) "2"))
+       (should (equal (nth 3 rebate) ""))
+       (should (equal (nth 4 rebate) "-8.00")))
+     ;; The product row itself still got its price/quantity/count logged.
+     (should (equal (test-org-shop--inventory-row shop-file "Scoop Away Plus")
+                    '("Scoop Away Plus" "39.99" "19kg" "2026-05-14"))))))
+
+(ert-deftest test-sync-same-product-twice-keeps-both-rows ()
+  "Two rows with one name on one day both land in history, and re-sync is idempotent."
+  (test-org-shop--with-shop-dir
+   (lambda (shop-file)
+     (test-org-shop--sync-daily "2026-05-14")
+     (let ((chickens (cl-remove-if-not (lambda (r) (string= (car r) "Whole Chicken"))
+                                       (test-org-shop--shop-history shop-file))))
+       (should (equal (mapcar (lambda (r) (nth 4 r)) chickens) '("12.13" "12.02"))))
+     ;; Second sync of the same table must not add a third row.
+     (test-org-shop--sync-daily "2026-05-14")
+     (let ((chickens (cl-remove-if-not (lambda (r) (string= (car r) "Whole Chicken"))
+                                       (test-org-shop--shop-history shop-file))))
+       (should (= (length chickens) 2)))
+     (should (= (length (test-org-shop--shop-history shop-file)) 5)))))
+
+(ert-deftest test-sync-advances-last-bought-never-backwards ()
+  (test-org-shop--with-shop-dir
+   (lambda (shop-file)
+     (test-org-shop--sync-daily "2026-05-14")
+     (should (equal (nth 3 (test-org-shop--inventory-row shop-file "Whole Chicken")) "2026-05-14"))
+     ;; a new product is stamped with the purchase date
+     (should (equal (nth 3 (test-org-shop--inventory-row shop-file "Barramundi Fillet")) "2026-05-14"))
+     ;; syncing an OLDER day afterwards does not move last_bought back
+     (test-org-shop--sync-daily "2026-04-10")
+     (should (equal (nth 3 (test-org-shop--inventory-row shop-file "Whole Chicken")) "2026-05-14")))))
+
+(provide 'test-org-shop)
+;;; test-org-shop.el ends here

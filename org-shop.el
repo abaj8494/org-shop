@@ -1122,6 +1122,31 @@ Returns t if product was found and updated, nil otherwise."
                  when (string-equal-ignore-case (org-shop--get-cell "product") product)
                  return (progn (org-shop--set-cell "quantity" quantity) t))))))
 
+(defun org-shop--rebate-row-p (price discount)
+  "Non-nil when a shopping row is a rebate line, not a product.
+A rebate row carries a negative PRICE or the literal `rebate' DISCOUNT tag
+(the shape the receipt pipeline emits: `<Product> rebate | rebate | -8.00').
+Such rows are logged to history but never added to, or priced into, the
+inventory table."
+  (or (and discount (string-equal-ignore-case (string-trim discount) "rebate"))
+      (and price (not (string-empty-p price))
+           (< (string-to-number price) 0))))
+
+(defun org-shop--update-last-bought-in-shop (shop-file product date)
+  "Set PRODUCT's last_bought to DATE in SHOP-FILE, if DATE is not older.
+No-op when the inventory has no last_bought column. Returns t on update."
+  (with-current-buffer (find-file-noselect shop-file)
+    (save-excursion
+      (when (and (org-shop--goto-table-after-heading org-shop-source-heading)
+                 (org-shop--has-column-p "last_bought"))
+        (cl-loop for line-num in (org-shop--table-data-lines)
+                 do (org-table-goto-line line-num)
+                 when (string-equal-ignore-case (org-shop--get-cell "product") product)
+                 return (let ((cur (string-trim (or (org-shop--get-cell "last_bought") ""))))
+                          (when (or (string-empty-p cur) (string< cur date))
+                            (org-shop--set-cell "last_bought" date)
+                            t)))))))
+
 (defun org-shop--product-exists-in-shop-p (shop-file product)
   "Check if PRODUCT exists in SHOP-FILE's regular table."
   (with-current-buffer (find-file-noselect shop-file)
@@ -1211,11 +1236,17 @@ Returns point at history table."
       ;; Return to history table
       (org-shop--goto-table-after-heading org-shop-history-heading))))
 
-(defun org-shop--find-history-entry (product date)
+(defun org-shop--find-history-entry (product date &optional nth)
   "Find history table row matching PRODUCT and DATE.
+NTH (default 1) selects the NTH such row in table order, so a daily that
+lists the same product twice on one day (two weighed chickens at different
+prices) maps its first row to the first history row and its second to the
+second instead of both upserting the same line.
 Returns line number if found, nil otherwise.
 Point must be at start of history table."
   (let ((found nil)
+        (seen 0)
+        (want (or nth 1))
         (table-start (point)))
     (while (and (not found) (org-at-table-p) (not (eobp)))
       (unless (org-at-table-hline-p)
@@ -1223,7 +1254,9 @@ Point must be at start of history table."
               (row-date (string-trim (or (org-table-get nil 2) ""))))
           (when (and (string-equal-ignore-case row-product product)
                      (string-equal row-date date))
-            (setq found (line-number-at-pos)))))
+            (setq seen (1+ seen))
+            (when (= seen want)
+              (setq found (line-number-at-pos))))))
       (forward-line 1))
     (goto-char table-start)
     found))
@@ -1331,10 +1364,12 @@ Point must be within the history table."
       (org-table-goto-line 1)
       (org-table-align))))
 
-(defun org-shop--upsert-history (shop-file product count price &optional date discount)
+(defun org-shop--upsert-history (shop-file product count price &optional date discount nth)
   "Upsert purchase history entry for PRODUCT to SHOP-FILE.
 DATE is the purchase date; defaults to today.
 DISCOUNT is the discount rate (e.g., 0.3 for 30% off).
+NTH (default 1) addresses the NTH row for PRODUCT + date, see
+`org-shop--find-history-entry'.
 If entry for PRODUCT + date exists: update count/price/discount.
 If count is 0 or empty: remove entry.
 Otherwise: insert new row."
@@ -1367,7 +1402,7 @@ Otherwise: insert new row."
             (forward-line 1)
             (when (org-at-table-hline-p)
               (forward-line 1))
-            (let ((existing-line (org-shop--find-history-entry product date)))
+            (let ((existing-line (org-shop--find-history-entry product date nth)))
               (cond
                ;; Entry exists and count > 0: update it
                ((and existing-line (> count-num 0))
@@ -1524,6 +1559,11 @@ For done items [X]: upserts purchase to history (product, date, count, discount,
 For not-done items [ ]: removes from history if previously synced.
 For items with new_price: updates price in shop file.
 For new products (not in shop): adds them to inventory table.
+Done items also advance the inventory row's last_bought (never backwards).
+Rebate rows (`<Product> rebate', discount `rebate' or a negative price) are
+logged to history only — never added to or priced into the inventory.
+Two rows with the same product on one day (e.g. two weighed chickens at
+different prices) both survive in history, matched by position.
 Re-syncing is safe - updates existing entries instead of creating duplicates."
   (interactive)
   (unless (org-shop--at-table-p)
@@ -1532,6 +1572,7 @@ Re-syncing is safe - updates existing entries instead of creating duplicates."
          (shop-name (org-shop--resolve-shop))
          (shop-file (org-shop--find-shop-file shop-name))
          (rows (org-shop--parse-shopping-table))
+         (occurrences (make-hash-table :test #'equal))
          (logged 0)
          (removed 0)
          (price-updated 0)
@@ -1548,33 +1589,44 @@ Re-syncing is safe - updates existing entries instead of creating duplicates."
         ;; Skip Summary row
         (unless (string= product "Summary")
           ;; Determine effective price
-          (let ((price (if (and new-price (not (string-empty-p new-price)))
-                           new-price
-                         known-price)))
-            ;; Check if product exists in shop, add if new
-            (unless (org-shop--product-exists-in-shop-p shop-file product)
+          (let* ((price (if (and new-price (not (string-empty-p new-price)))
+                            new-price
+                          known-price))
+                 (rebate (org-shop--rebate-row-p price discount))
+                 (is-done (and done (string-match-p "X" done)))
+                 (key (downcase (string-trim product)))
+                 ;; Nth row for this product in THIS table: lets two rows with
+                 ;; the same name (two weighed chickens) coexist in history.
+                 (nth (puthash key (1+ (gethash key occurrences 0)) occurrences)))
+            ;; Check if product exists in shop, add if new (never for rebates)
+            (unless (or rebate (org-shop--product-exists-in-shop-p shop-file product))
               (org-shop--add-product-to-shop shop-file product price notes date)
               (cl-incf products-added))
             ;; Upsert to history based on done status
-            (if (and done (string-match-p "X" done))
+            (if is-done
                 ;; Done: upsert with count (or 1 if empty)
                 (progn
-                  (org-shop--upsert-history shop-file product count price date discount)
+                  (org-shop--upsert-history shop-file product count price date
+                                            (if rebate nil discount) nth)
                   (cl-incf logged))
               ;; Not done: upsert with count=0 to remove from history
-              (org-shop--upsert-history shop-file product "0" price date nil)
+              (org-shop--upsert-history shop-file product "0" price date nil nth)
               (cl-incf removed))
-            ;; Update price in shop file if we have an effective price
-            ;; (updates even when new_price == known_price, since shop file might be empty)
-            (when (and price (not (string-empty-p price)))
-              (org-shop--update-price-in-shop shop-file product price)
-              (cl-incf price-updated))
-            ;; Update quantity in shop file if we have quantity
-            (when (and quantity (not (string-empty-p quantity)))
-              (org-shop--update-quantity-in-shop shop-file product quantity))
-            ;; Update notes in shop file if we have notes
-            (when (and notes (not (string-empty-p notes)))
-              (org-shop--update-notes-in-shop shop-file product notes))))))
+            (unless rebate
+              ;; Update price in shop file if we have an effective price
+              ;; (updates even when new_price == known_price, since shop file might be empty)
+              (when (and price (not (string-empty-p price)))
+                (org-shop--update-price-in-shop shop-file product price)
+                (cl-incf price-updated))
+              ;; Update quantity in shop file if we have quantity
+              (when (and quantity (not (string-empty-p quantity)))
+                (org-shop--update-quantity-in-shop shop-file product quantity))
+              ;; Update notes in shop file if we have notes
+              (when (and notes (not (string-empty-p notes)))
+                (org-shop--update-notes-in-shop shop-file product notes))
+              ;; A done row is a purchase: advance last_bought (never backwards)
+              (when is-done
+                (org-shop--update-last-bought-in-shop shop-file product date)))))))
     ;; Save shop file
     (with-current-buffer (find-file-noselect shop-file)
       (save-buffer))
