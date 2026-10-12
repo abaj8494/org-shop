@@ -1132,6 +1132,18 @@ inventory table."
       (and price (not (string-empty-p price))
            (< (string-to-number price) 0))))
 
+(defun org-shop--last-bought-in-shop (shop-file product)
+  "Return PRODUCT's last_bought cell in SHOP-FILE's inventory, or nil."
+  (with-current-buffer (find-file-noselect shop-file)
+    (save-excursion
+      (when (and (org-shop--goto-table-after-heading org-shop-source-heading)
+                 (org-shop--has-column-p "last_bought"))
+        (cl-loop for line-num in (org-shop--table-data-lines)
+                 do (org-table-goto-line line-num)
+                 when (string-equal-ignore-case (org-shop--get-cell "product") product)
+                 return (let ((cur (string-trim (or (org-shop--get-cell "last_bought") ""))))
+                          (unless (string-empty-p cur) cur)))))))
+
 (defun org-shop--update-last-bought-in-shop (shop-file product date)
   "Set PRODUCT's last_bought to DATE in SHOP-FILE, if DATE is not older.
 No-op when the inventory has no last_bought column. Returns t on update."
@@ -1562,7 +1574,8 @@ For done items [X]: upserts purchase to history (product, date, count, discount,
 For not-done items [ ]: removes from history if previously synced.
 For items with new_price: updates price in shop file.
 For new products (not in shop): adds them to inventory table.
-Done items also advance the inventory row's last_bought (never backwards).
+Done items also advance the inventory row's last_bought (never backwards),
+and a daily OLDER than the row's last_bought leaves price/quantity/notes alone.
 Rebate rows (`<Product> rebate', discount `rebate' or a negative price) are
 logged to history only — never added to or priced into the inventory.
 Two rows with the same product on one day (e.g. two weighed chickens at
@@ -1615,7 +1628,12 @@ Re-syncing is safe - updates existing entries instead of creating duplicates."
               ;; Not done: upsert with count=0 to remove from history
               (org-shop--upsert-history shop-file product "0" price date nil nth)
               (cl-incf removed))
-            (unless rebate
+            ;; The inventory row describes the MOST RECENT purchase.  Re-syncing
+            ;; an older daily (an audit replay, a late scan) must not drag
+            ;; price/quantity/notes back to that day's values.
+            (unless (or rebate
+                        (let ((lb (org-shop--last-bought-in-shop shop-file product)))
+                          (and lb (string< date lb))))
               ;; Update price in shop file if we have an effective price
               ;; (updates even when new_price == known_price, since shop file might be empty)
               (when (and price (not (string-empty-p price)))

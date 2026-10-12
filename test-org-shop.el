@@ -711,11 +711,12 @@ Total = 9.55"
         (kill-buffer (get-file-buffer shop-file)))
       (delete-directory dir t))))
 
-(defun test-org-shop--sync-daily (date)
-  "Run `org-shop-sync' on the test daily, pretending its file is named DATE.org."
+(defun test-org-shop--sync-daily (date &optional contents)
+  "Run `org-shop-sync' on the test daily, pretending its file is named DATE.org.
+CONTENTS defaults to `test-org-shop--costco-daily'."
   (with-temp-buffer
     (org-mode)
-    (insert test-org-shop--costco-daily)
+    (insert (or contents test-org-shop--costco-daily))
     (setq buffer-file-name (concat "/nonexistent/" date ".org"))
     (goto-char (point-min))
     (re-search-forward "^|")
@@ -804,9 +805,18 @@ Total = 9.55"
      (should (equal (nth 3 (test-org-shop--inventory-row shop-file "Whole Chicken")) "2026-05-14"))
      ;; a new product is stamped with the purchase date
      (should (equal (nth 3 (test-org-shop--inventory-row shop-file "Barramundi Fillet")) "2026-05-14"))
-     ;; syncing an OLDER day afterwards does not move last_bought back
-     (test-org-shop--sync-daily "2026-04-10")
-     (should (equal (nth 3 (test-org-shop--inventory-row shop-file "Whole Chicken")) "2026-05-14")))))
+     ;; syncing an OLDER day afterwards does not move last_bought back,
+     ;; nor the price/quantity (the inventory row is the latest purchase)
+     (test-org-shop--sync-daily
+      "2026-04-10"
+      (replace-regexp-in-string "12\\.02" "11.00" test-org-shop--costco-daily))
+     (should (equal (test-org-shop--inventory-row shop-file "Whole Chicken")
+                    '("Whole Chicken" "12.02" "" "2026-05-14")))
+     ;; but the older day's purchases are still logged in history
+     (should (cl-find-if (lambda (r) (and (string= (car r) "Whole Chicken")
+                                          (string= (nth 1 r) "2026-04-10")
+                                          (string= (nth 4 r) "11.00")))
+                         (test-org-shop--shop-history shop-file))))))
 
 (provide 'test-org-shop)
 ;;; test-org-shop.el ends here
