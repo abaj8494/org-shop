@@ -1329,9 +1329,12 @@ Point must be within the history table."
                 (push (list product date count-str discount-str price-str) rows))))
           (forward-line 1)))
       (setq table-end (point))
-      ;; Sort rows by date descending
-      (setq rows (sort rows (lambda (a b)
-                              (string> (nth 1 a) (nth 1 b)))))
+      ;; Sort rows by date descending.  `push' collected them in reverse,
+      ;; so restore table order first: `sort' is stable, and same-date rows
+      ;; must keep their position for `org-shop--find-history-entry's NTH
+      ;; matching to be idempotent across re-syncs.
+      (setq rows (sort (nreverse rows) (lambda (a b)
+                                         (string> (nth 1 a) (nth 1 b)))))
       ;; Delete old table content (keep header)
       (goto-char table-start)
       (forward-line 1) ; skip header

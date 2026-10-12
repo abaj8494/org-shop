@@ -786,11 +786,15 @@ Total = 9.55"
      (let ((chickens (cl-remove-if-not (lambda (r) (string= (car r) "Whole Chicken"))
                                        (test-org-shop--shop-history shop-file))))
        (should (equal (mapcar (lambda (r) (nth 4 r)) chickens) '("12.13" "12.02"))))
-     ;; Second sync of the same table must not add a third row.
+     ;; Second sync of the same table must not add a third row, and must
+     ;; leave each row's own price in place (the reorganise step used to
+     ;; flip same-date rows, so the 2nd sync overwrote 12.13 with 12.02).
      (test-org-shop--sync-daily "2026-05-14")
      (let ((chickens (cl-remove-if-not (lambda (r) (string= (car r) "Whole Chicken"))
                                        (test-org-shop--shop-history shop-file))))
-       (should (= (length chickens) 2)))
+       (should (= (length chickens) 2))
+       (should (equal (sort (mapcar (lambda (r) (nth 4 r)) chickens) #'string<)
+                      '("12.02" "12.13"))))
      (should (= (length (test-org-shop--shop-history shop-file)) 5)))))
 
 (ert-deftest test-sync-advances-last-bought-never-backwards ()
